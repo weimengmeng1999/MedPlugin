@@ -150,9 +150,15 @@ function previewBlocks(value) {
   return value.preview === undefined ? [] : [{ type: 'image', attachment: value.preview }]
 }
 
+/** Append a note explaining why a generated preview isn't shown, when that's known. */
+function withPreviewNote(text, value) {
+  if (value.preview !== undefined || value.preview_skipped_reason === undefined) return text
+  return `${text}\n\n(A preview image was generated at ${value.preview_image_path} but not attached here: ${value.preview_skipped_reason}.)`
+}
+
 function renderReport(value) {
   const text = renderResult(value, v => (typeof v.report_text === 'string' ? v.report_text : '(no report_text in output)'))
-  return [{ type: 'text', text }, ...previewBlocks(value)]
+  return [{ type: 'text', text: withPreviewNote(text, value) }, ...previewBlocks(value)]
 }
 
 function renderAnatomy(value) {
@@ -161,12 +167,12 @@ function renderAnatomy(value) {
     if (boxes.length === 0) return 'No anatomical structures located.'
     return boxes.map(b => `${b.label}: box_2d=${JSON.stringify(b.box_2d)}`).join('\n')
   })
-  return [{ type: 'text', text }, ...previewBlocks(value)]
+  return [{ type: 'text', text: withPreviewNote(text, value) }, ...previewBlocks(value)]
 }
 
 function renderLongitudinal(value) {
   const text = renderResult(value, v => (typeof v.comparison_text === 'string' ? v.comparison_text : '(no comparison_text in output)'))
-  return [{ type: 'text', text }, ...previewBlocks(value)]
+  return [{ type: 'text', text: withPreviewNote(text, value) }, ...previewBlocks(value)]
 }
 
 function renderSegmentation(value) {
@@ -176,7 +182,7 @@ function renderSegmentation(value) {
     if (structures.length > 0) lines.push(structures.join(', '))
     return lines.join('\n')
   })
-  return [{ type: 'text', text }, ...previewBlocks(value)]
+  return [{ type: 'text', text: withPreviewNote(text, value) }, ...previewBlocks(value)]
 }
 
 /**
@@ -208,18 +214,30 @@ async function loadPreviewAttachment(attachments, path) {
  * If `value.preview_image_path` names a file this process wrote and the
  * current route can carry an image, commit it through the attachment
  * service and attach the resulting reference as `value.preview`.
- * Best-effort: an unreadable temp file, a rejected save, no attachment
- * service, or a non-image-capable route all leave `value` unchanged rather
- * than failing a tool call whose primary result already succeeded.
+ * Best-effort: an unreadable temp file or a rejected save leaves `value`
+ * unchanged rather than failing a tool call whose primary result already
+ * succeeded. A known reason for skipping (no attachment service, or a
+ * route that declared it can't carry images — e.g. DeepSeek's own
+ * chat-completions models, which are text-only at the wire level) is
+ * recorded as `value.preview_skipped_reason` so the tool's rendered text
+ * can say why, instead of the image just silently not appearing.
  */
 async function attachPreview(ctx, exec, value) {
   if (value.status !== 'success' || typeof value.preview_image_path !== 'string') return value
   const attachments = ctx.get('attachments')
-  if (attachments === undefined) return value
-  if (!(await isImageCapableRoute(ctx, exec))) return value
+  if (attachments === undefined) {
+    value.preview_skipped_reason = 'no attachment service is mounted in this profile'
+    return value
+  }
+  if (!(await isImageCapableRoute(ctx, exec))) {
+    value.preview_skipped_reason = 'the current model route does not declare image input'
+    return value
+  }
   const ref = await loadPreviewAttachment(attachments, value.preview_image_path).catch(() => undefined)
   if (ref !== undefined) {
     value.preview = { attachmentId: ref.attachmentId, mediaType: ref.mediaType, bytes: ref.bytes, width: ref.width, height: ref.height }
+  } else {
+    value.preview_skipped_reason = 'the preview file could not be read or committed'
   }
   return value
 }
