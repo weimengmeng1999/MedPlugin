@@ -71,7 +71,12 @@ from pathlib import Path
 # main project env while inheriting torch/CUDA via --system-site-packages.
 
 _SKILL_DIR   = Path(__file__).resolve().parent
-_VENV_DIR    = _SKILL_DIR / ".venv"
+# Keyed by this script's own name, not just its directory: xray/ holds
+# multiple scripts with different dependency lists (MAIRA-2 needs
+# protobuf/sentencepiece but not scikit-image; the MedGemma scripts are the
+# reverse), so a directory-wide venv would let whichever script runs first
+# silently decide what's installed for the others.
+_VENV_DIR    = _SKILL_DIR / f".venv-{Path(__file__).stem}"
 _VENV_PYTHON = _VENV_DIR / "bin" / "python"
 
 

@@ -1,7 +1,7 @@
 {
   "name": "dsh-xray-report-generation",
   "version": "0.1.0",
-  "description": "Chest X-ray specialist tools for deepseek-harness: MAIRA-2 report generation/grounding, MedGemma 1.5 anatomy localization and longitudinal comparison.",
+  "description": "Chest X-ray and CT specialist tools for deepseek-harness: MAIRA-2 report generation/grounding, MedGemma 1.5 anatomy localization and longitudinal comparison, MedGemma 4B X-ray and CT reports.",
   "type": "module",
   "main": "index.js",
   "files": [
@@ -19,6 +19,7 @@
     "dsh-plugin",
     "radiology",
     "chest-x-ray",
+    "ct-scan",
     "medical-imaging"
   ],
   "dsh": {

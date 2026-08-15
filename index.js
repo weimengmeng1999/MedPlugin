@@ -24,11 +24,13 @@ const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000
 /** Directory this module lives in, so the shipped skills/ scripts resolve regardless of the caller's cwd. */
 const PACKAGE_DIR = fileURLToPath(new URL('.', import.meta.url))
 
-/** Script locations, relative to skillsDir. */
+/** Script locations, relative to skillsDir, organized by imaging modality. */
 const SCRIPTS = {
-  maira: 'xray_grounding/run_xray_grounding_maira.py',
-  anatomy: 'medgemma_multimodal/run_xray_anatomy_localization.py',
-  longitudinal: 'medgemma_multimodal/run_xray_medgemma_longitudinal.py',
+  xrayMaira: 'xray/maira2_report.py',
+  xrayAnatomy: 'xray/medgemma_anatomy_localization.py',
+  xrayLongitudinal: 'xray/medgemma_longitudinal.py',
+  xrayMedgemma: 'xray/medgemma_report.py',
+  ctMedgemma: 'ct/medgemma_report.py',
 }
 
 /** Bytes of stdout/stderr retained for error diagnostics; older bytes are dropped. */
@@ -40,8 +42,9 @@ function appendCapped(buf, chunk) {
 }
 
 /**
- * Run one of the xray specialist python scripts and parse its stdout as
- * JSON. Every script prints progress to stderr and exactly one JSON object
+ * Run one of the specialist python scripts under skills/ and parse its
+ * stdout as JSON. Every script prints progress to stderr and exactly one
+ * JSON object
  * to stdout (both success and script-reported error use this same
  * contract), so a killed process or stdout that never parses as JSON is
  * treated as an infrastructure failure (thrown); a well-formed
@@ -112,7 +115,7 @@ function runPythonScript(opts) {
 }
 
 /** Shared success/error output shape: every script's JSON has one of these two shapes on its final stdout line. */
-function xrayOutputSchema(successStatus) {
+function outputSchema(successStatus) {
   return {
     oneOf: [
       {
@@ -134,17 +137,17 @@ function xrayOutputSchema(successStatus) {
   }
 }
 
-function renderXray(value, formatSuccess) {
+function renderResult(value, formatSuccess) {
   if (value.status === 'error') return `Error: ${value.error}`
   return formatSuccess(value)
 }
 
 function renderReport(value) {
-  return renderXray(value, v => (typeof v.report_text === 'string' ? v.report_text : '(no report_text in output)'))
+  return renderResult(value, v => (typeof v.report_text === 'string' ? v.report_text : '(no report_text in output)'))
 }
 
 function renderAnatomy(value) {
-  return renderXray(value, (v) => {
+  return renderResult(value, (v) => {
     const boxes = Array.isArray(v.boxes) ? v.boxes : []
     if (boxes.length === 0) return 'No anatomical structures located.'
     return boxes.map(b => `${b.label}: box_2d=${JSON.stringify(b.box_2d)}`).join('\n')
@@ -152,7 +155,7 @@ function renderAnatomy(value) {
 }
 
 function renderLongitudinal(value) {
-  return renderXray(value, v => (typeof v.comparison_text === 'string' ? v.comparison_text : '(no comparison_text in output)'))
+  return renderResult(value, v => (typeof v.comparison_text === 'string' ? v.comparison_text : '(no comparison_text in output)'))
 }
 
 /**
@@ -190,7 +193,7 @@ export function apply(ctx, config = {}) {
       gpu: { type: 'integer', description: 'GPU index (-1 for CPU). Default 2.' },
     },
     output: {
-      schema: xrayOutputSchema('success'),
+      schema: outputSchema('success'),
       render: (_args, value) => [{ type: 'text', text: renderReport(value) }],
     },
     isConcurrencySafe: () => false,
@@ -209,7 +212,7 @@ export function apply(ctx, config = {}) {
       cliArgs.push('--mode', mode)
       if (args.phrase !== undefined) cliArgs.push('--phrase', args.phrase)
       cliArgs.push('--gpu', String(args.gpu ?? 2))
-      return run(SCRIPTS.maira, cliArgs, exec.signal)
+      return run(SCRIPTS.xrayMaira, cliArgs, exec.signal)
     },
   }))
 
@@ -222,14 +225,14 @@ export function apply(ctx, config = {}) {
       gpu: { type: 'integer', description: 'GPU index (-1 for CPU). Default -1 (CPU).' },
     },
     output: {
-      schema: xrayOutputSchema('success'),
+      schema: outputSchema('success'),
       render: (_args, value) => [{ type: 'text', text: renderAnatomy(value) }],
     },
     isConcurrencySafe: () => false,
     async execute(args, exec) {
       const cliArgs = ['--input', args.input, '--gpu', String(args.gpu ?? -1)]
       if (args.anatomy !== undefined && args.anatomy.length > 0) cliArgs.push('--anatomy', ...args.anatomy)
-      return run(SCRIPTS.anatomy, cliArgs, exec.signal)
+      return run(SCRIPTS.xrayAnatomy, cliArgs, exec.signal)
     },
   }))
 
@@ -243,14 +246,62 @@ export function apply(ctx, config = {}) {
       gpu: { type: 'integer', description: 'GPU index (-1 for CPU). Default 2.' },
     },
     output: {
-      schema: xrayOutputSchema('success'),
+      schema: outputSchema('success'),
       render: (_args, value) => [{ type: 'text', text: renderLongitudinal(value) }],
     },
     isConcurrencySafe: () => false,
     async execute(args, exec) {
       const cliArgs = ['--input', args.input, '--prior', args.prior, '--gpu', String(args.gpu ?? 2)]
       if (args.indication !== undefined) cliArgs.push('--indication', args.indication)
-      return run(SCRIPTS.longitudinal, cliArgs, exec.signal)
+      return run(SCRIPTS.xrayLongitudinal, cliArgs, exec.signal)
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'xray_report_medgemma',
+    description: 'Generate a chest X-ray radiology report with MedGemma 4B. Plain narrative findings text. Loads a multi-GB model onto a GPU, so a single call can take minutes.',
+    parameters: {
+      input: { type: 'string', required: true, description: 'Absolute path to the frontal chest X-ray (PNG, JPG, or DICOM .dcm).' },
+      indication: { type: 'string', description: 'Clinical indication, e.g. "Shortness of breath."' },
+      max_new_tokens: { type: 'integer', description: 'Max new tokens to generate. Default 512.' },
+      gpu: { type: 'integer', description: 'GPU index (-1 for CPU). Default 0.' },
+    },
+    output: {
+      schema: outputSchema('success'),
+      render: (_args, value) => [{ type: 'text', text: renderReport(value) }],
+    },
+    isConcurrencySafe: () => false,
+    async execute(args, exec) {
+      const cliArgs = ['--input', args.input, '--gpu', String(args.gpu ?? 0)]
+      if (args.indication !== undefined) cliArgs.push('--indication', args.indication)
+      cliArgs.push('--max_new_tokens', String(args.max_new_tokens ?? 512))
+      return run(SCRIPTS.xrayMedgemma, cliArgs, exec.signal)
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'ct_report_medgemma',
+    description: 'Generate a CT radiology report candidate with MedGemma 4B. MedGemma is a 2D image-text model, so this converts the CT volume into a fixed axial-slice montage first — treat the result as a complementary candidate, not a substitute for a native 3D CT model. Loads a multi-GB model onto a GPU, so a single call can take minutes.',
+    parameters: {
+      input: { type: 'string', required: true, description: 'Absolute path to a .nii/.nii.gz CT volume, or a directory containing one DICOM series.' },
+      study_id: { type: 'string', description: 'Study identifier to echo back in the result (optional, for your own bookkeeping).' },
+      indication: { type: 'string', description: 'Clinical indication, e.g. "Abdominal pain, rule out appendicitis."' },
+      n_slices: { type: 'integer', description: 'Number of axial slices sampled into the montage. Default 16.' },
+      max_new_tokens: { type: 'integer', description: 'Max new tokens to generate. Default 512.' },
+      gpu: { type: 'integer', description: 'GPU index (-1 for CPU). Default 0.' },
+    },
+    output: {
+      schema: outputSchema('success'),
+      render: (_args, value) => [{ type: 'text', text: renderReport(value) }],
+    },
+    isConcurrencySafe: () => false,
+    async execute(args, exec) {
+      const cliArgs = ['--input', args.input, '--gpu', String(args.gpu ?? 0)]
+      if (args.study_id !== undefined) cliArgs.push('--study_id', args.study_id)
+      if (args.indication !== undefined) cliArgs.push('--indication', args.indication)
+      cliArgs.push('--n_slices', String(args.n_slices ?? 16))
+      cliArgs.push('--max_new_tokens', String(args.max_new_tokens ?? 512))
+      return run(SCRIPTS.ctMedgemma, cliArgs, exec.signal)
     },
   }))
 }
