@@ -1,0 +1,3 @@
+- insert:
+    - id: xray-report-generation
+      name: dsh-xray-report-generation
