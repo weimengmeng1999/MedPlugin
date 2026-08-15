@@ -24,27 +24,14 @@ const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000
 /**
  * Script locations, mirroring the BASE_DIR + *_SCRIPT constants in
  * MedOmni's medomni/med_teams/xray_team.py so this plugin calls the exact
- * same scripts xray_team.py's build_xray_specialist_tools() does.
- *
- * xray_team.py also exposes detection_tool (CarinaNet) and bone_tool
- * (SigLIP2) — both intentionally left out here. Unlike every script below,
- * their run_xray_detection.py / run_xray_bone_classification.py have no
- * isolated-venv bootstrap of their own: they import bare `torch` /
- * `transformers` against whatever the ambient Python environment happens to
- * have, which can silently conflict with another tool's pinned versions
- * (e.g. MAIRA-2 requires transformers>=4.48,<4.52). Every script kept here
- * re-execs itself into its own `.venv*` on first run, so tools never fight
- * over dependency versions.
+ * same scripts xray_team.py's build_xray_specialist_tools() does. Scoped to
+ * just MAIRA-2 and MedGemma 1.5 — see README for the other specialist
+ * scripts xray_team.py exposes that this package deliberately leaves out.
  */
 const SCRIPTS = {
-  chexagent: 'xray_report_generation/run_xray_grounding_chexagent.py',
-  llavaRad: 'xray_report_generation/run_xray_llava_rad.py',
   maira: 'xray_grounding/run_xray_grounding_maira.py',
-  classification: 'xray-classification/run_xray_classification.py',
   anatomy: 'medgemma_multimodal/run_xray_anatomy_localization.py',
   longitudinal: 'medgemma_multimodal/run_xray_medgemma_longitudinal.py',
-  radzero: 'xray_grounding_radzero/run_radzero.py',
-  caseRetrieval: 'xray_case_retrieval/run_case_retrieval.py',
 }
 
 /** Bytes of stdout/stderr retained for error diagnostics; older bytes are dropped. */
@@ -100,11 +87,10 @@ function runPythonScript(opts) {
         reject(new Error(`${opts.scriptPath}: ${killedReason}${stderr ? `\n--- stderr tail ---\n${stderr.slice(-2000)}` : ''}`))
         return
       }
-      // Most scripts print single-line JSON; chexagent and case_retrieval's
-      // success paths use `json.dumps(..., indent=2)` and pretty-print
-      // across many lines. Try the whole trimmed stdout first, falling back
-      // to just the last line for a script whose stdout carries a trailing
-      // non-JSON line ahead of a vendored library's own stdout chatter.
+      // Most scripts print single-line JSON, but try the whole trimmed
+      // stdout first regardless, falling back to just the last line for a
+      // script whose stdout carries a trailing non-JSON line ahead of a
+      // vendored library's own stdout chatter.
       const text = stdout.trim()
       const lastLine = text.split('\n').at(-1) ?? ''
       try {
@@ -160,24 +146,6 @@ function renderReport(value) {
   return renderXray(value, v => (typeof v.report_text === 'string' ? v.report_text : '(no report_text in output)'))
 }
 
-function renderClassification(value) {
-  return renderXray(value, (v) => {
-    const scores = v.scores ?? {}
-    const findings = Array.isArray(v.findings) ? v.findings : []
-    const critical = Array.isArray(v.critical_findings) ? v.critical_findings : []
-    const top3 = Array.isArray(v.top_3) ? v.top_3 : []
-    const lines = [
-      `Model: ${String(v.model)}, threshold: ${String(v.threshold)}`,
-      findings.length > 0
-        ? `Findings above threshold: ${findings.map(f => `${f} (${(scores[f] ?? 0).toFixed(3)})`).join(', ')}`
-        : 'No findings above threshold.',
-    ]
-    if (critical.length > 0) lines.push(`Critical findings: ${critical.join(', ')}`)
-    lines.push(`Top 3 by score: ${top3.join(', ')}`)
-    return lines.join('\n')
-  })
-}
-
 function renderAnatomy(value) {
   return renderXray(value, (v) => {
     const boxes = Array.isArray(v.boxes) ? v.boxes : []
@@ -188,22 +156,6 @@ function renderAnatomy(value) {
 
 function renderLongitudinal(value) {
   return renderXray(value, v => (typeof v.comparison_text === 'string' ? v.comparison_text : '(no comparison_text in output)'))
-}
-
-function renderRadzero(value) {
-  return renderXray(value, (v) => {
-    const predictions = Array.isArray(v.predictions) ? v.predictions : []
-    if (predictions.length === 0) return 'No predictions.'
-    return predictions.map(p => `[${p.present ? '+' : ' '}] ${p.prompt} (score=${p.score.toFixed(3)})`).join('\n')
-  })
-}
-
-function renderCaseRetrieval(value) {
-  return renderXray(value, (v) => {
-    const cases = Array.isArray(v.cases) ? v.cases : []
-    if (cases.length === 0) return `No similar cases found (index has ${String(v.n_indexed ?? 0)} cases).`
-    return cases.map(c => `sim=${c.similarity.toFixed(3)}  ${c.image_path}\n  reference: ${c.reference}`).join('\n\n')
-  })
 }
 
 /**
@@ -230,64 +182,6 @@ export function apply(ctx, config = {}) {
     const cwd = scriptPath.slice(0, scriptPath.lastIndexOf('/'))
     return runPythonScript({ pythonBin, scriptPath, args, cwd, timeoutMs, signal })
   }
-
-  ctx.tools.register(defineTool({
-    name: 'xray_report_chexagent',
-    description: 'Generate a chest X-ray radiology report with CheXagent-8b. Fast, plain narrative findings text (no bounding boxes). Loads a multi-GB model onto a GPU, so a single call can take minutes.',
-    parameters: {
-      input: { type: 'string', required: true, description: 'Absolute path to the frontal chest X-ray (PNG, JPG, or DICOM .dcm).' },
-      indication: { type: 'string', description: 'Clinical indication, e.g. "Dyspnea."' },
-      section_by_section: { type: 'boolean', description: 'Generate section by section (Airway/Breathing/Cardiac/Diaphragm/Everything else) instead of one pass.' },
-      gpu: { type: 'integer', description: 'GPU index (-1 for CPU). Default 1.' },
-      max_tokens: { type: 'integer', description: 'Max new tokens per generation call. Default 512.' },
-    },
-    output: {
-      schema: xrayOutputSchema('ok'),
-      render: (_args, value) => [{ type: 'text', text: renderReport(value) }],
-    },
-    isConcurrencySafe: () => false,
-    async execute(args, exec) {
-      const cliArgs = ['--input', args.input]
-      if (args.indication !== undefined) cliArgs.push('--indication', args.indication)
-      if (args.section_by_section === true) cliArgs.push('--section_by_section')
-      cliArgs.push('--gpu', String(args.gpu ?? 1))
-      cliArgs.push('--max_tokens', String(args.max_tokens ?? 512))
-      return run(SCRIPTS.chexagent, cliArgs, exec.signal)
-    },
-  }))
-
-  ctx.tools.register(defineTool({
-    name: 'xray_report_llava_rad',
-    description: 'Generate a chest X-ray radiology report with LLaVA-Rad. Plain narrative findings text; optionally reasons over draft reports from MAIRA-2 and MedGemma for the SAME image when both draft files are given. Loads a multi-GB model onto a GPU, so a single call can take minutes.',
-    parameters: {
-      input: { type: 'string', required: true, description: 'Absolute path to the frontal chest X-ray (PNG, JPG, or DICOM .dcm).' },
-      indication: { type: 'string', description: 'Clinical indication, e.g. "Shortness of breath."' },
-      maira2_draft_file: { type: 'string', description: 'Absolute path to a text file with MAIRA-2\'s draft report for this SAME image. Requires medgemma_draft_file too.' },
-      medgemma_draft_file: { type: 'string', description: 'Absolute path to a text file with MedGemma\'s draft report for this SAME image. Requires maira2_draft_file too.' },
-      temperature: { type: 'number', description: 'Sampling temperature (0 = greedy). Default 0.' },
-      max_new_tokens: { type: 'integer', description: 'Max new tokens to generate. Default 256.' },
-      gpu: { type: 'integer', description: 'GPU index (-1 for CPU). Default 2.' },
-    },
-    output: {
-      schema: xrayOutputSchema('success'),
-      render: (_args, value) => [{ type: 'text', text: renderReport(value) }],
-    },
-    isConcurrencySafe: () => false,
-    async execute(args, exec) {
-      const cliArgs = ['--input', args.input]
-      if (args.indication !== undefined) cliArgs.push('--indication', args.indication)
-      if (args.maira2_draft_file !== undefined && args.medgemma_draft_file !== undefined) {
-        cliArgs.push('--maira2_draft_file', args.maira2_draft_file)
-        cliArgs.push('--medgemma_draft_file', args.medgemma_draft_file)
-      }
-      cliArgs.push('--temperature', String(args.temperature ?? 0))
-      cliArgs.push('--max_new_tokens', String(args.max_new_tokens ?? 256))
-      // Default 2, matching xray_team.py's run_xray_llava_rad_report wrapper
-      // (the standalone script's own argparse default is 0).
-      cliArgs.push('--gpu', String(args.gpu ?? 2))
-      return run(SCRIPTS.llavaRad, cliArgs, exec.signal)
-    },
-  }))
 
   ctx.tools.register(defineTool({
     name: 'xray_report_maira',
@@ -333,29 +227,6 @@ export function apply(ctx, config = {}) {
   }))
 
   ctx.tools.register(defineTool({
-    name: 'xray_classification',
-    description: 'Classify chest X-ray pathologies (18 classes, DenseNet121). Fast — no GPU model load comparable to the report generators.',
-    parameters: {
-      input: { type: 'string', required: true, description: 'Absolute path to the chest X-ray (PNG, JPG, or DICOM .dcm).' },
-      model: { type: 'string', description: 'Classifier model id. Default "densenet121-res224-all".' },
-      threshold: { type: 'number', description: 'Score threshold for a positive finding. Default 0.5.' },
-      gpu: { type: 'integer', description: 'GPU index (-1 for CPU). Default 2.' },
-    },
-    output: {
-      schema: xrayOutputSchema('success'),
-      render: (_args, value) => [{ type: 'text', text: renderClassification(value) }],
-    },
-    isConcurrencySafe: () => false,
-    async execute(args, exec) {
-      const cliArgs = ['--input', args.input]
-      if (args.model !== undefined) cliArgs.push('--model', args.model)
-      cliArgs.push('--threshold', String(args.threshold ?? 0.5))
-      cliArgs.push('--gpu', String(args.gpu ?? 2))
-      return run(SCRIPTS.classification, cliArgs, exec.signal)
-    },
-  }))
-
-  ctx.tools.register(defineTool({
     name: 'xray_anatomy_localization',
     description: 'Localize anatomical structures in a chest X-ray (MedGemma 1.5-4b-it) as labeled bounding boxes only — no pathology assertions, no findings. Only call this when precise spatial localization is itself diagnostically relevant: verifying device/hardware position relative to an anatomic landmark, localizing an unusual mass/lesion/foreign body, or the user explicitly asks where something is. One of the slower tools (~2 minutes) — skip for routine screening.',
     parameters: {
@@ -393,45 +264,6 @@ export function apply(ctx, config = {}) {
       const cliArgs = ['--input', args.input, '--prior', args.prior, '--gpu', String(args.gpu ?? 2)]
       if (args.indication !== undefined) cliArgs.push('--indication', args.indication)
       return run(SCRIPTS.longitudinal, cliArgs, exec.signal)
-    },
-  }))
-
-  ctx.tools.register(defineTool({
-    name: 'xray_radzero_grounding',
-    description: 'Alternate zero-shot phrase grounding using RadZero (Deepnoid) — full-sentence prompts (e.g. "There is cardiomegaly") map to a classification score, not bounding boxes. Different mechanism from xray_report_maira\'s grounding. Use when the user explicitly asks for RadZero, or wants a presence score per prompt instead of boxes.',
-    parameters: {
-      input: { type: 'string', required: true, description: 'Absolute path to the chest X-ray (PNG, JPG, or DICOM .dcm).' },
-      prompts: { type: 'string', description: 'Comma-separated full-sentence prompts starting with "There is" (optional — omit to use the script\'s default prompt set).' },
-      gpu: { type: 'integer', description: 'GPU index (-1 for CPU). Default 2.' },
-    },
-    output: {
-      schema: xrayOutputSchema('success'),
-      render: (_args, value) => [{ type: 'text', text: renderRadzero(value) }],
-    },
-    isConcurrencySafe: () => false,
-    async execute(args, exec) {
-      const cliArgs = ['--input', args.input, '--gpu', String(args.gpu ?? 2)]
-      if (args.prompts !== undefined) cliArgs.push('--prompts', args.prompts)
-      return run(SCRIPTS.radzero, cliArgs, exec.signal)
-    },
-  }))
-
-  ctx.tools.register(defineTool({
-    name: 'xray_case_retrieval',
-    description: 'Retrieve similar prior chest X-ray cases with confirmed reference reports from a static, pre-built index (case-based precedent). Relevant when the case is genuinely ambiguous or atypical: a borderline classifier score, an unusual presentation, or a rare finding where precedent would help. Skip on clear-cut, high-confidence cases. First call downloads ~6.6GB of checkpoints from Google Drive — can be slow or hit Drive\'s download quota.',
-    parameters: {
-      input: { type: 'string', required: true, description: 'Absolute path to the query chest X-ray (PNG, JPG, or DICOM .dcm).' },
-      k: { type: 'integer', description: 'Number of similar cases to return. Default 5.' },
-      gpu: { type: 'integer', description: 'GPU index (-1 for CPU). Default 2.' },
-    },
-    output: {
-      schema: xrayOutputSchema('success'),
-      render: (_args, value) => [{ type: 'text', text: renderCaseRetrieval(value) }],
-    },
-    isConcurrencySafe: () => false,
-    async execute(args, exec) {
-      const cliArgs = ['--input', args.input, '--k', String(args.k ?? 5), '--gpu', String(args.gpu ?? 2)]
-      return run(SCRIPTS.caseRetrieval, cliArgs, exec.signal)
     },
   }))
 }
