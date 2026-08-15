@@ -14,23 +14,13 @@ No official fine-tuned report-generation checkpoint is released on HuggingFace;
 this script prompts the base instruction-tuned model using the task format
 described in the technical report (Appendix A6 / A7).
 
-Differences from LLaVA-Rad:
-  - Uses transformers pipeline (same isolated venv as anatomy localization)
-  - Optional system prompt "You are an expert radiologist."
-  - Model switchable via --model (default: google/medgemma-4b-it)
-
-Isolated venv:
-  The script auto-creates skills_scripts/medgemma_multimodal/.venv on first
-  run (or reuses the existing one) and re-execs itself there.  The caller
-  never needs to activate anything manually.
-
 Usage:
-  python run_xray_medgemma_report.py --input xray.png
+  python medgemma_report.py --input xray.png
 
-  python run_xray_medgemma_report.py --input xray.png \\
+  python medgemma_report.py --input xray.png \\
       --indication "Shortness of breath." --gpu 1
 
-  python run_xray_medgemma_report.py --input xray.png --output result.json
+  python medgemma_report.py --input xray.png --output result.json
 """
 
 import os
@@ -40,11 +30,6 @@ from pathlib import Path
 
 # ── Shared venv bootstrap ─────────────────────────────────────────────────────
 _SKILL_DIR   = Path(__file__).resolve().parent
-# One venv for the whole plugin, shared across skills/xray/ and skills/ct/.
-# Whichever script runs first creates it and installs the full union package
-# list below; every other script must carry that identical list (and a
-# transformers range intersecting [4.50,4.52)) or venv-creation order becomes
-# load-bearing.
 _VENV_DIR    = _SKILL_DIR.parent / ".venv"
 _VENV_PYTHON = _VENV_DIR / "bin" / "python"
 
@@ -83,10 +68,6 @@ def _ensure_venv_and_reexec():
 
 _ensure_venv_and_reexec()
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Everything below runs only inside the isolated venv.
-# ─────────────────────────────────────────────────────────────────────────────
-
 import argparse
 import json
 import re
@@ -103,45 +84,12 @@ import time
 
 _SYSTEM_PROMPT = "You are an expert radiologist."
 
-def build_prompt(indication: str = None, draft_reports: dict = None) -> str:
-    """
-    draft_reports (optional): {"MAIRA-2": "<report text>", "LLaVA-Rad": "<report text>", ...}
-    -- OTHER models' draft findings for this SAME image (any number, e.g. 2
-    or 3), given to MedGemma as additional evidence to reason over alongside
-    what it sees itself, rather than the bare single-model prompt below.
-    Tests whether MedGemma acting as a "dominant" reasoning model over N
-    naive drafts (still multimodal -- it sees the actual image too, not
-    text-only synthesis) beats MedGemma generating alone, or the
-    deterministic per-pathology fusion already used in production
-    (c88437a9 session follow-up: 2-draft version -- MAIRA-2 + LLaVA-Rad --
-    already showed a real gain over MedGemma alone, 0.400 vs 0.359 GREEN,
-    though still short of fusion's 0.412; 3-draft adds CheXagent to test
-    whether more corroborating evidence closes that gap further).
-    Default None preserves the original bare-prompt behavior exactly.
-    """
-    base = (
+def build_prompt(indication: str = None) -> str:
+    return (
         f"Generate the findings section of a radiology report for this "
         f"chest X-ray. Clinical indication: {indication}"
         if indication else
         "Generate the findings section of a radiology report for this chest X-ray."
-    )
-    if not draft_reports:
-        return base
-
-    drafts_text = "\n\n".join(
-        f"Draft from {name}:\n{text}" for name, text in draft_reports.items() if text
-    )
-    n = len(draft_reports)
-    plural = "systems" if n != 1 else "system"
-    return (
-        f"{base}\n\n"
-        f"{n} other AI {plural} already produced draft findings for this SAME image "
-        f"(shown below). Look at the actual image yourself, then use these drafts as "
-        f"additional evidence -- where they agree with what you see, that's corroborating "
-        f"support; where they disagree with each other or with what you see, reason about "
-        f"which is more likely correct based on the image. Write ONE final findings section "
-        f"reflecting your own best judgment, not a simple merge of the drafts.\n\n"
-        f"{drafts_text}"
     )
 
 
@@ -187,8 +135,7 @@ def load_pipeline(gpu: int, model_id: str = "google/medgemma-4b-it"):
     # someone else's full model, that redundant .to(cuda:0) OOMs even though
     # the model already loaded fine on the GPU we actually asked for. The
     # {"": "cuda:N"} dict form is the real single-device device_map and
-    # short-circuits that second .to() call. Same bug/fix as LLaVA-Rad's
-    # device-split crash earlier this session.
+    # short-circuits that second .to() call.
     device_map = {"": f"cuda:{gpu}"} if gpu >= 0 else {"": "cpu"}
     print(f"[medgemma-report] device_map={device_map}", file=sys.stderr, flush=True)
 
@@ -204,14 +151,13 @@ def load_pipeline(gpu: int, model_id: str = "google/medgemma-4b-it"):
 
 # ── Inference ─────────────────────────────────────────────────────────────────
 
-def run_report(pipe, image, indication: str = None,
-               max_new_tokens: int = 512, draft_reports: dict = None) -> str:
+def run_report(pipe, image, indication: str = None, max_new_tokens: int = 512) -> str:
     """
     Generate findings text for one frontal X-ray.
 
     Returns plain text (stripped of any thinking trace).
     """
-    prompt = build_prompt(indication, draft_reports)
+    prompt = build_prompt(indication)
 
     messages = [
         {
@@ -256,15 +202,6 @@ def main():
     )
     parser.add_argument("--indication", default=None,
                         help="Clinical indication e.g. 'Shortness of breath.'")
-    parser.add_argument("--maira2_draft_file", default=None,
-                        help="Path to a text file with MAIRA-2's draft report for this SAME "
-                             "image -- if given (with --llava_draft_file), MedGemma reasons "
-                             "over both drafts alongside the image instead of the bare prompt")
-    parser.add_argument("--llava_draft_file", default=None,
-                        help="Path to a text file with LLaVA-Rad's draft report for this SAME image")
-    parser.add_argument("--chexagent_draft_file", default=None,
-                        help="Path to a text file with CheXagent's draft report for this SAME "
-                             "image (optional 3rd draft, added alongside MAIRA-2/LLaVA-Rad)")
     parser.add_argument("--model", default="google/medgemma-4b-it",
                         help="HuggingFace model ID (default: google/medgemma-4b-it)")
     parser.add_argument("--max_new_tokens", type=int, default=512)
@@ -293,22 +230,12 @@ def main():
         print(json.dumps({"status": "error", "error": f"Model loading failed: {e}"}))
         sys.exit(1)
 
-    draft_reports = None
-    if args.maira2_draft_file and args.llava_draft_file:
-        draft_reports = {
-            "MAIRA-2": Path(args.maira2_draft_file).read_text().strip(),
-            "LLaVA-Rad": Path(args.llava_draft_file).read_text().strip(),
-        }
-        if args.chexagent_draft_file:
-            draft_reports["CheXagent"] = Path(args.chexagent_draft_file).read_text().strip()
-
     print("[medgemma-report] Running inference ...", file=sys.stderr)
     try:
         report_text = run_report(
             pipe, image,
             indication=args.indication,
             max_new_tokens=args.max_new_tokens,
-            draft_reports=draft_reports,
         )
     except Exception as e:
         print(json.dumps({"status": "error", "error": f"Inference failed: {e}"}))
@@ -320,12 +247,8 @@ def main():
         "status":      "success",
         "image_path":  str(args.input),
         "model":       args.model,
-        "mode":        "reasoning_report" if draft_reports else "report",
         "indication":  args.indication,
         "report_text": report_text,
-        "findings":    None,
-        "n_findings":  0,
-        "n_with_boxes": 0,
         "elapsed_s":   elapsed,
     }
 

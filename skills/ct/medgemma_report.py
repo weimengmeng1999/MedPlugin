@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 """
+Meng Wei
+
 CT report-generation candidate with MedGemma.
 
 MedGemma is a 2-D image-text-to-text model, so this script converts a CT volume
@@ -13,11 +15,6 @@ import sys
 from pathlib import Path
 
 _SKILL_DIR = Path(__file__).resolve().parent
-# One venv for the whole plugin, shared across skills/xray/ and skills/ct/.
-# Whichever script runs first creates it and installs the full union package
-# list below; every other script must carry that identical list (and a
-# transformers range intersecting [4.50,4.52)) or venv-creation order becomes
-# load-bearing.
 _VENV_DIR = _SKILL_DIR.parent / ".venv"
 _VENV_PYTHON = _VENV_DIR / "bin" / "python"
 

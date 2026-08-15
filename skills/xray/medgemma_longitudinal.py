@@ -5,45 +5,40 @@ Author: Meng Wei
 Chest X-Ray Longitudinal Comparison — google/medgemma-1.5-4b-it
 
 MedGemma 1.5 4B's documented "Longitudinal & Temporal Radiology Analysis"
-capability (see skills_scripts/medgemma_multimodal/tool.md, section 2.4):
-evaluates a PAIR of chest X-rays (prior vs. current study) to describe
-interval change. Benchmarked on MS-CXR-T (65.7% macro-accuracy, tool.md
-section 3) across Improved/Stable/Worsened categories for Consolidation,
-Edema, Pleural Effusion, Pneumonia, and Pneumothorax.
+capability: evaluates a PAIR of chest X-rays (prior vs. current study) to
+describe interval change. Benchmarked on MS-CXR-T (65.7% macro-accuracy)
+across Improved/Stable/Worsened categories for Consolidation, Edema,
+Pleural Effusion, Pneumonia, and Pneumothorax.
 
 Message/prompt pattern taken directly from Google's own official notebook
 (github.com/Google-Health/medgemma/blob/main/notebooks/
-cxr_longitudinal_comparison_with_hugging_face.ipynb, fetched and verified
-this session) -- two images in ONE user-turn content list
-([prior_image, current_image, text]), not two separate tool calls. This
-is the only verified real usage pattern for this task: tool.md documents
-the capability and its benchmark categories, but (unlike anatomy
-localization's own "Final Answer: JSON list" format) gives no exact
-prompt template for section 2.4 specifically, so the prompt here is
-written to steer toward those documented categories/pathologies without
-claiming a validated structured-output format -- output is freeform
-comparison text, matching what the official notebook actually
-demonstrates, not an invented rigid parse.
+cxr_longitudinal_comparison_with_hugging_face.ipynb) -- two images in ONE
+user-turn content list ([prior_image, current_image, text]), not two
+separate tool calls. Google's documentation gives no exact structured
+output format for this task, so the prompt here steers toward the
+documented categories/pathologies without claiming a validated
+structured-output format -- output is freeform comparison text, matching
+what the official notebook actually demonstrates, not an invented rigid
+parse.
 
-Differences from the single-image report script (run_xray_medgemma_report.py):
+Differences from the single-image report script (medgemma_report.py):
   - Requires TWO images: --input (current) and --prior (earlier study)
   - Model is medgemma-1.5-4b-it specifically (not the plain 4b-it) --
     this capability is documented for 1.5, and 1.5 is already the model
     this skill's own anatomy-localization script uses successfully.
   - Uses the device_map={"": f"cuda:{gpu}"} dict form (not a bare
-    "cuda:N" string) -- see run_xray_medgemma_report.py's own comment for
-    the confirmed OOM bug this avoids on a shared GPU box.
+    "cuda:N" string) -- see medgemma_report.py's own comment for the
+    confirmed OOM bug this avoids on a shared GPU box.
 
-Isolated venv:
-  Reuses the same skills_scripts/medgemma_multimodal/.venv as the other
-  MedGemma scripts in this directory (transformers>=4.50.0 already
-  required there for gemma3/MedGemma 1.5 architecture) -- auto-created on
-  first run if it doesn't exist yet.
+Shared venv:
+  Reuses the same skills/.venv as the other scripts under skills/
+  (transformers>=4.50.0,<4.52 already required there for gemma3/MedGemma
+  1.5 architecture) -- auto-created on first run if it doesn't exist yet.
 
 Usage:
-  python run_xray_medgemma_longitudinal.py --input current.png --prior prior.png
+  python medgemma_longitudinal.py --input current.png --prior prior.png
 
-  python run_xray_medgemma_longitudinal.py --input current.png --prior prior.png \\
+  python medgemma_longitudinal.py --input current.png --prior prior.png \\
       --indication "Follow-up for pneumonia." --gpu 1
 """
 
@@ -107,15 +102,12 @@ import time
 
 
 # ── Prompt ────────────────────────────────────────────────────────────────────
-# System prompt matches tool.md section 4.1's exact required text for
-# radiology/CXR tasks ("You are a helpful radiology assistant.") -- the
-# official notebook itself sends no system turn at all for this task, so
+# The official notebook itself sends no system turn at all for this task, so
 # adding this one is additive, not a deviation from a documented pattern.
 #
-# The comparison instruction below steers toward tool.md section 2.4's
-# documented categories/pathologies without claiming a validated
-# structured-output format (no template exists for this task in section
-# 4.2) -- output is freeform comparison text, matching what the official
+# The comparison instruction below steers toward MedGemma 1.5's documented
+# categories/pathologies without claiming a validated structured-output
+# format -- output is freeform comparison text, matching what the official
 # notebook itself demonstrates.
 #
 # Unlike the notebook's own prompt (which never states which image is
@@ -184,9 +176,9 @@ def load_pipeline(gpu: int, model_id: str = "google/medgemma-1.5-4b-it"):
     print(f"[medgemma-longitudinal] Loading {model_id} ...", file=sys.stderr, flush=True)
 
     # {"": "cuda:N"} dict form, not a bare "cuda:N" string -- see
-    # run_xray_medgemma_report.py's own comment for the confirmed OOM bug
-    # this avoids (Pipeline.__init__ redundantly re-placing the model onto
-    # cuda:0 when device_map isn't a real HF-recognized device_map value).
+    # medgemma_report.py's own comment for the confirmed OOM bug this avoids
+    # (Pipeline.__init__ redundantly re-placing the model onto cuda:0 when
+    # device_map isn't a real HF-recognized device_map value).
     device_map = {"": f"cuda:{gpu}"} if gpu >= 0 else {"": "cpu"}
     print(f"[medgemma-longitudinal] device_map={device_map}", file=sys.stderr, flush=True)
 

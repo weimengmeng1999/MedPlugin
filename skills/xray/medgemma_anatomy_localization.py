@@ -17,24 +17,25 @@ Default anatomy set (Chest ImaGenome):
   right upper lung zone, right mid lung zone, right lower lung zone,
   left upper lung zone, left mid lung zone, left lower lung zone
 
-Isolated venv:
-  The script auto-creates skills_scripts/medgemma_multimodal/venv/ on first run
-  using --system-site-packages (inherits torch/cuda from the main env) and
-  installs transformers>=4.50.0 (required for gemma3 architecture).
-  It then re-execs itself inside the venv so the caller never needs to activate
-  anything manually.
+Shared venv:
+  The script auto-creates skills/.venv (shared with every other script under
+  skills/) on first run using --system-site-packages (inherits torch/cuda
+  from the invoking Python) and installs transformers>=4.50.0,<4.52 (required
+  for the gemma3 architecture). It then re-execs itself inside the venv so
+  the caller never needs to activate anything manually.
 
-Requirements (main env):
+Requirements (ambient Python):
   torch  (inherited via --system-site-packages)
 
 Venv requirements (auto-installed on first run):
-  transformers>=4.50.0  accelerate  pillow  scikit-image  numpy
+  transformers>=4.50.0,<4.52  accelerate  pillow  protobuf  sentencepiece
+  numpy  scikit-image  nibabel  simpleitk
 
 Usage:
-  python run_xray_anatomy_localization.py --input chest.png
-  python run_xray_anatomy_localization.py --input chest.png --anatomy "right lung" "left lung"
-  python run_xray_anatomy_localization.py --input chest.dcm --output ./out/result.json --gpu 1
-  python run_xray_anatomy_localization.py --input chest.png --draw annotated.png
+  python medgemma_anatomy_localization.py --input chest.png
+  python medgemma_anatomy_localization.py --input chest.png --anatomy "right lung" "left lung"
+  python medgemma_anatomy_localization.py --input chest.dcm --output ./out/result.json --gpu 1
+  python medgemma_anatomy_localization.py --input chest.png --draw annotated.png
 """
 
 import os

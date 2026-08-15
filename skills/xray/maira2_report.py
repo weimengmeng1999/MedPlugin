@@ -35,30 +35,31 @@ Inputs:
 
 Usage:
   # Plain report
-  python run_xray_grounding.py --input xray.png --mode report
+  python maira2_report.py --input xray.png --mode report
 
   # Grounded report (findings + bounding boxes)
-  python run_xray_grounding.py --input xray.png --lateral lat.png --mode grounded_report
+  python maira2_report.py --input xray.png --lateral lat.png --mode grounded_report
 
   # Phrase grounding
-  python run_xray_grounding.py --input xray.png --mode phrase_grounding \
+  python maira2_report.py --input xray.png --mode phrase_grounding \
       --phrase "Pleural effusion"
 
   # Full context
-  python run_xray_grounding.py --input xray.png --lateral lat.png \
+  python maira2_report.py --input xray.png --lateral lat.png \
       --indication "Dyspnea." --technique "PA and lateral." --comparison "None." \
       --mode grounded_report --gpu 1
 
-Isolated venv:
+Shared venv:
   MAIRA-2's trust_remote_code=True modeling code (downloaded from the HF repo
   at load time) requires transformers>=4.48.0,<4.52 (tested against 4.51.3) —
-  a much older range than the newer transformers versions other packages in
-  the main env pull in, which breaks MAIRA-2 with cryptic AttributeErrors
-  (e.g. 'Maira2ForConditionalGeneration' object has no attribute 'model').
-  The script auto-creates skills_scripts/xray_grounding/.venv on first run
-  using --system-site-packages (inherits torch/cuda from the main env), pins
-  transformers to the compatible range there, and re-execs itself inside the
-  venv so the caller never needs to activate anything manually.
+  older than what an ambient Python environment is likely to have, which
+  breaks MAIRA-2 with cryptic AttributeErrors (e.g.
+  'Maira2ForConditionalGeneration' object has no attribute 'model'). The
+  script auto-creates skills/.venv (shared with every other script under
+  skills/) on first run using --system-site-packages (inherits torch/cuda
+  from the invoking Python), pins transformers to the compatible range
+  there, and re-execs itself inside the venv so the caller never needs to
+  activate anything manually.
 """
 
 import os
