@@ -75,6 +75,7 @@ _ensure_venv_and_reexec()
 import argparse
 import json
 import re
+import tempfile
 import time
 
 
@@ -471,7 +472,7 @@ def main():
     parser.add_argument("--max_tokens", type=int, default=4096,
                         help="Max new tokens for generation")
     parser.add_argument("--draw", "-d", default=None, metavar="PATH",
-                        help="Save annotated image with bounding boxes to this path (PNG)")
+                        help="Save annotated image with bounding boxes to this path (PNG); default: a temp file")
     args = parser.parse_args()
 
     # ── Validate ──────────────────────────────────────────────────────────────
@@ -526,13 +527,15 @@ def main():
         print(f"[medgemma-loc] Saved JSON to {args.output}", file=sys.stderr)
 
     # ── Optional: draw annotated image ────────────────────────────────────────
-    if args.draw:
-        draw_path = Path(args.draw)
-        draw_path.parent.mkdir(parents=True, exist_ok=True)
-        annotated = draw_bounding_boxes(image, pred["boxes"])
-        annotated.save(str(draw_path))
-        print(f"[medgemma-loc] Saved annotated image to {args.draw}", file=sys.stderr)
-        result["annotated_image_path"] = str(args.draw)
+    draw_path = (
+        Path(args.draw) if args.draw
+        else Path(tempfile.mkdtemp(prefix="medgemma_loc_preview_")) / "preview.png"
+    )
+    draw_path.parent.mkdir(parents=True, exist_ok=True)
+    annotated = draw_bounding_boxes(image, pred["boxes"])
+    annotated.save(str(draw_path))
+    print(f"[medgemma-loc] Saved annotated image to {draw_path}", file=sys.stderr)
+    result["preview_image_path"] = str(draw_path)
 
     # ── Summary to stderr ─────────────────────────────────────────────────────
     print(f"\n{'='*55}", file=sys.stderr)

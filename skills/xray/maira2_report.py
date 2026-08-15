@@ -100,6 +100,7 @@ _ensure_venv_and_reexec()
 
 import argparse
 import json
+import tempfile
 
 
 # ── Image loading ─────────────────────────────────────────────────────────────
@@ -220,6 +221,39 @@ def run_phrase_grounding(model, processor, device, frontal, phrase: str):
     return prediction
 
 
+# ── Preview image ──────────────────────────────────────────────────────────────
+
+def draw_report_boxes(image, findings: list[dict]):
+    from PIL import ImageDraw, ImageFont
+
+    img = image.copy().convert("RGB")
+    draw = ImageDraw.Draw(img, "RGBA")
+
+    try:
+        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 16)
+    except Exception:
+        font = ImageFont.load_default()
+
+    palette = [
+        (255, 80, 80), (80, 200, 80), (80, 130, 255), (255, 200, 50),
+        (200, 80, 255), (50, 220, 220), (255, 140, 0), (180, 255, 80),
+    ]
+
+    idx = 0
+    for finding in findings:
+        boxes = finding.get("boxes_original")
+        if not boxes:
+            continue
+        color = palette[idx % len(palette)]
+        for box in boxes:
+            x1, y1, x2, y2 = (int(v) for v in box)
+            draw.rectangle([x1, y1, x2, y2], outline=color + (255,), width=2, fill=color + (30,))
+            draw.text((x1 + 2, max(y1 - 18, 0)), str(idx + 1), fill=color + (255,), font=font)
+        idx += 1
+
+    return img
+
+
 # ── Output serialisation ──────────────────────────────────────────────────────
 
 def serialise_prediction(prediction, frontal_size: tuple, processor) -> dict:
@@ -304,6 +338,8 @@ def main():
                         help="GPU index (-1 for CPU)")
     parser.add_argument("--output", "-o", default=None,
                         help="Path to write result JSON (optional)")
+    parser.add_argument("--preview_output", default=None,
+                        help="Path to save the preview PNG (optional, default: a temp file)")
     args = parser.parse_args()
 
     # ── Validate ──────────────────────────────────────────────────────────────
@@ -376,6 +412,18 @@ def main():
         "n_with_boxes":   len([f for f in pred_dict["findings"] if f["boxes_original"]])
                           if pred_dict["findings"] else 0,
     }
+
+    # ── Preview image ─────────────────────────────────────────────────────────
+    preview_image = frontal
+    if result["n_with_boxes"] > 0:
+        preview_image = draw_report_boxes(frontal, pred_dict["findings"])
+    preview_path = (
+        Path(args.preview_output) if args.preview_output
+        else Path(tempfile.mkdtemp(prefix="maira2_preview_")) / "preview.png"
+    )
+    preview_path.parent.mkdir(parents=True, exist_ok=True)
+    preview_image.save(str(preview_path))
+    result["preview_image_path"] = str(preview_path)
 
     # ── Optional: save to file ────────────────────────────────────────────────
     if args.output:

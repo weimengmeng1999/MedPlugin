@@ -40,6 +40,7 @@ Usage:
 import os
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 _SKILL_DIR   = Path(__file__).resolve().parent
@@ -91,6 +92,28 @@ _SYSTEM_PROMPT = "You are a helpful radiology assistant."
 _COMPARISON_PATHOLOGIES = (
     "consolidation, pulmonary edema, pleural effusion, pneumonia, and pneumothorax"
 )
+
+
+def side_by_side(prior, current, gap: int = 8):
+    from PIL import Image, ImageDraw, ImageFont
+
+    h = max(prior.height, current.height)
+    w = prior.width + current.width + gap
+    canvas = Image.new("RGB", (w, h), (0, 0, 0))
+    canvas.paste(prior, (0, 0))
+    canvas.paste(current, (prior.width + gap, 0))
+
+    draw = ImageDraw.Draw(canvas)
+    try:
+        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 18)
+    except Exception:
+        font = ImageFont.load_default()
+    draw.rectangle([0, 0, 90, 24], fill=(0, 0, 0))
+    draw.text((4, 3), "PRIOR", fill=(255, 255, 255), font=font)
+    draw.rectangle([prior.width + gap, 0, prior.width + gap + 110, 24], fill=(0, 0, 0))
+    draw.text((prior.width + gap + 4, 3), "CURRENT", fill=(255, 255, 255), font=font)
+
+    return canvas
 
 
 def build_prompt(indication: str = None) -> str:
@@ -234,6 +257,8 @@ def main():
                         help="GPU index (-1 for CPU)")
     parser.add_argument("--output", "-o", default=None,
                         help="Path to write result JSON (optional)")
+    parser.add_argument("--preview_output", default=None,
+                        help="Path to save the preview PNG (optional, default: a temp file)")
     args = parser.parse_args()
 
     if not Path(args.input).exists():
@@ -282,6 +307,14 @@ def main():
         "comparison_text":   comparison_text,
         "elapsed_s":         elapsed,
     }
+
+    preview_path = (
+        Path(args.preview_output) if args.preview_output
+        else Path(tempfile.mkdtemp(prefix="medgemma_longitudinal_preview_")) / "preview.png"
+    )
+    preview_path.parent.mkdir(parents=True, exist_ok=True)
+    side_by_side(prior_image, current_image).save(str(preview_path))
+    result["preview_image_path"] = str(preview_path)
 
     if args.output:
         out_path = Path(args.output)

@@ -70,6 +70,7 @@ _ensure_venv_and_reexec()
 import argparse
 import json
 import re
+import tempfile
 import time
 
 
@@ -208,6 +209,8 @@ def main():
                         help="GPU index (-1 for CPU)")
     parser.add_argument("--output", "-o", default=None,
                         help="Path to write result JSON (optional)")
+    parser.add_argument("--preview_output", default=None,
+                        help="Path to save the preview PNG (optional, default: a temp file)")
     args = parser.parse_args()
 
     if not Path(args.input).exists():
@@ -250,6 +253,14 @@ def main():
         "report_text": report_text,
         "elapsed_s":   elapsed,
     }
+
+    preview_path = (
+        Path(args.preview_output) if args.preview_output
+        else Path(tempfile.mkdtemp(prefix="medgemma_report_preview_")) / "preview.png"
+    )
+    preview_path.parent.mkdir(parents=True, exist_ok=True)
+    image.save(str(preview_path))
+    result["preview_image_path"] = str(preview_path)
 
     if args.output:
         out_path = Path(args.output)

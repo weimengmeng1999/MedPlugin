@@ -1,5 +1,6 @@
 import { fileURLToPath } from 'node:url'
 import { spawn } from 'node:child_process'
+import { readFile } from 'node:fs/promises'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 
 export const name = 'xray-report-generation'
@@ -144,29 +145,83 @@ function renderResult(value, formatSuccess) {
   return formatSuccess(value)
 }
 
+/** The image content block for `value.preview`, or none if no preview was attached. */
+function previewBlocks(value) {
+  return value.preview === undefined ? [] : [{ type: 'image', attachment: value.preview }]
+}
+
 function renderReport(value) {
-  return renderResult(value, v => (typeof v.report_text === 'string' ? v.report_text : '(no report_text in output)'))
+  const text = renderResult(value, v => (typeof v.report_text === 'string' ? v.report_text : '(no report_text in output)'))
+  return [{ type: 'text', text }, ...previewBlocks(value)]
 }
 
 function renderAnatomy(value) {
-  return renderResult(value, (v) => {
+  const text = renderResult(value, (v) => {
     const boxes = Array.isArray(v.boxes) ? v.boxes : []
     if (boxes.length === 0) return 'No anatomical structures located.'
     return boxes.map(b => `${b.label}: box_2d=${JSON.stringify(b.box_2d)}`).join('\n')
   })
+  return [{ type: 'text', text }, ...previewBlocks(value)]
 }
 
 function renderLongitudinal(value) {
-  return renderResult(value, v => (typeof v.comparison_text === 'string' ? v.comparison_text : '(no comparison_text in output)'))
+  const text = renderResult(value, v => (typeof v.comparison_text === 'string' ? v.comparison_text : '(no comparison_text in output)'))
+  return [{ type: 'text', text }, ...previewBlocks(value)]
 }
 
 function renderSegmentation(value) {
-  return renderResult(value, (v) => {
+  const text = renderResult(value, (v) => {
     const structures = Array.isArray(v.structures_found) ? v.structures_found : []
-    const lines = [`${v.n_structures ?? structures.length} structure(s) segmented, written to ${v.output_dir}`]
+    const lines = [`${v.n_structures ?? structures.length} structure(s) segmented, written to ${v.output_dir}. The segmentation masks are 3D NIfTI files, not directly viewable; the preview image (when attached) shows a rendered snapshot of where they landed, not the masks themselves.`]
     if (structures.length > 0) lines.push(structures.join(', '))
     return lines.join('\n')
   })
+  return [{ type: 'text', text }, ...previewBlocks(value)]
+}
+
+/**
+ * Soft-check whether the currently routed model declares image input.
+ * Never throws: an unresolved provider/model/llm service is treated as not
+ * capable, since a preview image is an enhancement, not the tool's primary
+ * output.
+ */
+async function isImageCapableRoute(ctx, exec) {
+  const routed = exec.agent?.session.requestHeader()?.config
+  const provider = routed?.provider ?? exec.agent?.options.provider
+  const model = routed?.model ?? exec.agent?.options.model
+  const llm = ctx.get('llm')
+  if (provider === undefined || model === undefined || llm === undefined) return false
+  try {
+    const active = await llm.resolveModelInfo(provider, model, exec.signal)
+    return active.inputModalities !== undefined && active.inputModalities.includes('image')
+  } catch {
+    return false
+  }
+}
+
+async function loadPreviewAttachment(attachments, path) {
+  const data = await readFile(path)
+  return attachments.saveImage({ data, mediaType: 'image/png', name: 'preview.png' })
+}
+
+/**
+ * If `value.preview_image_path` names a file this process wrote and the
+ * current route can carry an image, commit it through the attachment
+ * service and attach the resulting reference as `value.preview`.
+ * Best-effort: an unreadable temp file, a rejected save, no attachment
+ * service, or a non-image-capable route all leave `value` unchanged rather
+ * than failing a tool call whose primary result already succeeded.
+ */
+async function attachPreview(ctx, exec, value) {
+  if (value.status !== 'success' || typeof value.preview_image_path !== 'string') return value
+  const attachments = ctx.get('attachments')
+  if (attachments === undefined) return value
+  if (!(await isImageCapableRoute(ctx, exec))) return value
+  const ref = await loadPreviewAttachment(attachments, value.preview_image_path).catch(() => undefined)
+  if (ref !== undefined) {
+    value.preview = { attachmentId: ref.attachmentId, mediaType: ref.mediaType, bytes: ref.bytes, width: ref.width, height: ref.height }
+  }
+  return value
 }
 
 /**
@@ -205,7 +260,7 @@ export function apply(ctx, config = {}) {
     },
     output: {
       schema: outputSchema('success'),
-      render: (_args, value) => [{ type: 'text', text: renderReport(value) }],
+      render: (_args, value) => renderReport(value),
     },
     isConcurrencySafe: () => false,
     async execute(args, exec) {
@@ -223,7 +278,8 @@ export function apply(ctx, config = {}) {
       cliArgs.push('--mode', mode)
       if (args.phrase !== undefined) cliArgs.push('--phrase', args.phrase)
       cliArgs.push('--gpu', String(args.gpu ?? 2))
-      return run(SCRIPTS.xrayMaira, cliArgs, exec.signal)
+      const value = await run(SCRIPTS.xrayMaira, cliArgs, exec.signal)
+      return attachPreview(ctx, exec, value)
     },
   }))
 
@@ -237,13 +293,14 @@ export function apply(ctx, config = {}) {
     },
     output: {
       schema: outputSchema('success'),
-      render: (_args, value) => [{ type: 'text', text: renderAnatomy(value) }],
+      render: (_args, value) => renderAnatomy(value),
     },
     isConcurrencySafe: () => false,
     async execute(args, exec) {
       const cliArgs = ['--input', args.input, '--gpu', String(args.gpu ?? -1)]
       if (args.anatomy !== undefined && args.anatomy.length > 0) cliArgs.push('--anatomy', ...args.anatomy)
-      return run(SCRIPTS.xrayAnatomy, cliArgs, exec.signal)
+      const value = await run(SCRIPTS.xrayAnatomy, cliArgs, exec.signal)
+      return attachPreview(ctx, exec, value)
     },
   }))
 
@@ -258,13 +315,14 @@ export function apply(ctx, config = {}) {
     },
     output: {
       schema: outputSchema('success'),
-      render: (_args, value) => [{ type: 'text', text: renderLongitudinal(value) }],
+      render: (_args, value) => renderLongitudinal(value),
     },
     isConcurrencySafe: () => false,
     async execute(args, exec) {
       const cliArgs = ['--input', args.input, '--prior', args.prior, '--gpu', String(args.gpu ?? 2)]
       if (args.indication !== undefined) cliArgs.push('--indication', args.indication)
-      return run(SCRIPTS.xrayLongitudinal, cliArgs, exec.signal)
+      const value = await run(SCRIPTS.xrayLongitudinal, cliArgs, exec.signal)
+      return attachPreview(ctx, exec, value)
     },
   }))
 
@@ -279,14 +337,15 @@ export function apply(ctx, config = {}) {
     },
     output: {
       schema: outputSchema('success'),
-      render: (_args, value) => [{ type: 'text', text: renderReport(value) }],
+      render: (_args, value) => renderReport(value),
     },
     isConcurrencySafe: () => false,
     async execute(args, exec) {
       const cliArgs = ['--input', args.input, '--gpu', String(args.gpu ?? 0)]
       if (args.indication !== undefined) cliArgs.push('--indication', args.indication)
       cliArgs.push('--max_new_tokens', String(args.max_new_tokens ?? 512))
-      return run(SCRIPTS.xrayMedgemma, cliArgs, exec.signal)
+      const value = await run(SCRIPTS.xrayMedgemma, cliArgs, exec.signal)
+      return attachPreview(ctx, exec, value)
     },
   }))
 
@@ -303,7 +362,7 @@ export function apply(ctx, config = {}) {
     },
     output: {
       schema: outputSchema('success'),
-      render: (_args, value) => [{ type: 'text', text: renderReport(value) }],
+      render: (_args, value) => renderReport(value),
     },
     isConcurrencySafe: () => false,
     async execute(args, exec) {
@@ -348,7 +407,7 @@ export function apply(ctx, config = {}) {
     },
     output: {
       schema: outputSchema('success'),
-      render: (_args, value) => [{ type: 'text', text: renderSegmentation(value) }],
+      render: (_args, value) => renderSegmentation(value),
     },
     isConcurrencySafe: () => false,
     async execute(args, exec) {
@@ -364,7 +423,7 @@ export function apply(ctx, config = {}) {
     parameters: segmentationParams,
     output: {
       schema: outputSchema('success'),
-      render: (_args, value) => [{ type: 'text', text: renderSegmentation(value) }],
+      render: (_args, value) => renderSegmentation(value),
     },
     isConcurrencySafe: () => false,
     async execute(args, exec) {
