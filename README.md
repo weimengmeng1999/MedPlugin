@@ -13,7 +13,7 @@ skills/
     └── medgemma_report.py                  MedGemma 4B: axial-slice-montage report
 ```
 
-Each script's own `.venv-<script-name>` is keyed by its filename, not its directory — `xray/` holds four scripts with different dependency lists (MAIRA-2 needs `protobuf`/`sentencepiece` but not `scikit-image`; the MedGemma scripts are the reverse), so a shared directory-wide venv would let whichever script runs first silently decide what's installed for the others. Naming each venv after its own script keeps them from colliding regardless of run order.
+All five scripts share one venv at `skills/.venv`. Whichever tool runs first creates it and installs the union of every script's dependencies (MAIRA-2's `protobuf`/`sentencepiece`, the MedGemma scripts' `scikit-image`, the CT script's `nibabel`/`simpleitk`, and a `transformers` version in `[4.50,4.52)` — the range every script's own tested minimum still tolerates); every other script's own install list is required to match that union exactly, or which script happens to run first would silently decide what's available to the rest. Adding a sixth script under `skills/` means adding its new dependencies to all five existing lists too, not just its own.
 
 ## Tools
 
@@ -28,11 +28,11 @@ Each script's own `.venv-<script-name>` is keyed by its filename, not its direct
 ## Requirements
 
 - A deepseek-harness `dsh` installation.
-- [`uv`](https://docs.astral.sh/uv/) on `PATH`. Every script re-execs itself into its own isolated venv on first run via `uv venv` + `uv pip install` — if `uv` isn't installed, that bootstrap fails.
-- Python 3 on `PATH` to launch each script initially (it re-execs into its own venv regardless of which Python started it).
+- [`uv`](https://docs.astral.sh/uv/) on `PATH`. Whichever script runs first re-execs itself into a shared venv via `uv venv` + `uv pip install` — if `uv` isn't installed, that bootstrap fails.
+- Python 3 on `PATH` to launch each script initially (it re-execs into the shared venv regardless of which Python started it).
 - An NVIDIA GPU with CUDA for realistic latency. `gpu: -1` runs on CPU where a tool exposes it, but expect it to be slow.
 - A HuggingFace account + `HF_TOKEN` set in the environment (or `huggingface-cli login` already done). MAIRA-2 is a gated model on the Hub — nothing here can automate accepting that license for you. MedGemma is also commonly gated under Google's Health AI Developer Foundations terms; if a MedGemma-backed tool fails on first use with a model-access error, the same `HF_TOKEN` step is almost certainly why.
-- For `ct_report_medgemma`: the CT script additionally installs `nibabel` and `simpleitk` into its own venv (also automatic) to convert a `.nii`/`.nii.gz` volume or a DICOM series into the axial-slice montage MedGemma actually sees.
+- For `ct_report_medgemma`: `nibabel` and `simpleitk` (installed into the shared venv, also automatic) convert a `.nii`/`.nii.gz` volume or a DICOM series into the axial-slice montage MedGemma actually sees.
 
 ## Install
 
@@ -65,7 +65,7 @@ Nothing is required — the plugin defaults to the `skills/` directory shipped i
 
 Mostly, yes — but there are real, non-automatable exceptions worth knowing about before you rely on this:
 
-1. **Venv creation is automatic.** Every script re-execs itself into its own isolated venv on first invocation, pinning its own dependency versions (`uv venv` + `uv pip install`). You never run a setup script yourself.
+1. **Venv creation is automatic.** Whichever script runs first re-execs itself into one shared venv, pinning dependency versions (`uv venv` + `uv pip install`). You never run a setup script yourself.
 2. **Model weights are automatic** — every script calls HuggingFace's `from_pretrained`, which downloads and caches weights on first use.
 3. **Gated-model license acceptance is not automatic and cannot be.** MAIRA-2 needs `HF_TOKEN` after a one-time license click; MedGemma likely does too (see [Requirements](#requirements)).
 4. **GPU drivers are a host prerequisite**, same as any other GPU tool.
@@ -79,7 +79,7 @@ Two categories of specialist tool are deliberately not in this package:
 - **Other model families** (a plain-narrative report generator, a pathology classifier, an alternate phrase-grounding tool, a case-retrieval tool) are technically fine — each would follow the same self-contained-venv pattern as the tools here — but are out of scope for this package, which focuses on MAIRA-2 and MedGemma.
 - **Tube/line detection and bone-fracture classification** are excluded for a real technical reason on top of scope: their backing scripts have no isolated-venv bootstrap of their own — they'd import bare `torch`/`transformers` against whatever the ambient Python environment happens to provide, which can silently conflict with a pinned range like MAIRA-2's `transformers>=4.48,<4.52`.
 
-If you want to add tools back in this style, follow the pattern in `index.js`: a `SCRIPTS` entry pointing at a script under `skills/<modality>/`, a matching `defineTool` registration whose `execute` shells out to it and parses its JSON stdout, and (if it shares a directory with a script that has a different dependency list) a filename-keyed `_VENV_DIR` in the script itself.
+If you want to add tools back in this style, follow the pattern in `index.js`: a `SCRIPTS` entry pointing at a script under `skills/<modality>/`, a matching `defineTool` registration whose `execute` shells out to it and parses its JSON stdout, and the shared-venv bootstrap block from an existing script — with its install list extended to the union described above, and that same extended list copied into the other four scripts too.
 
 ## License
 

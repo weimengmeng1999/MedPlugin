@@ -66,17 +66,18 @@ import subprocess
 import sys
 from pathlib import Path
 
-# ── Isolated venv bootstrap (runs before any heavy imports) ──────────────────
-# Keeps transformers>=4.48.0,<4.52 (MAIRA-2's tested range) isolated from the
-# main project env while inheriting torch/CUDA via --system-site-packages.
+# ── Shared venv bootstrap (runs before any heavy imports) ────────────────────
+# Keeps transformers pinned to a range every skills/ script tolerates,
+# isolated from the main project env, while inheriting torch/CUDA via
+# --system-site-packages.
 
 _SKILL_DIR   = Path(__file__).resolve().parent
-# Keyed by this script's own name, not just its directory: xray/ holds
-# multiple scripts with different dependency lists (MAIRA-2 needs
-# protobuf/sentencepiece but not scikit-image; the MedGemma scripts are the
-# reverse), so a directory-wide venv would let whichever script runs first
-# silently decide what's installed for the others.
-_VENV_DIR    = _SKILL_DIR / f".venv-{Path(__file__).stem}"
+# One venv for the whole plugin, shared across skills/xray/ and skills/ct/.
+# Whichever script runs first creates it and installs the full union package
+# list below; every other script must carry that identical list (and a
+# transformers range intersecting [4.50,4.52)) or venv-creation order becomes
+# load-bearing.
+_VENV_DIR    = _SKILL_DIR.parent / ".venv"
 _VENV_PYTHON = _VENV_DIR / "bin" / "python"
 
 
@@ -100,14 +101,15 @@ def _ensure_venv_and_reexec():
         except importlib.metadata.PackageNotFoundError:
             torch_pin = None
 
-        constraints_file = _SKILL_DIR / ".uv-constraints.txt"
+        constraints_file = _SKILL_DIR.parent / ".uv-constraints.txt"
         constraints_file.write_text(f"{torch_pin}\n" if torch_pin else "")
 
         subprocess.check_call(
             ["uv", "pip", "install", "--python", str(_VENV_PYTHON),
              "--constraint", str(constraints_file),
-             "transformers>=4.48.0,<4.52", "accelerate", "pillow",
-             "protobuf", "sentencepiece", "numpy"],
+             "transformers>=4.50.0,<4.52", "accelerate", "pillow",
+             "protobuf", "sentencepiece", "numpy", "scikit-image",
+             "nibabel", "simpleitk"],
         )
         print("[maira-2] Venv ready.", file=sys.stderr)
 

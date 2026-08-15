@@ -13,10 +13,12 @@ import sys
 from pathlib import Path
 
 _SKILL_DIR = Path(__file__).resolve().parent
-# Keyed by this script's own name rather than just its directory, so another
-# script later added to ct/ with a different dependency list can never
-# collide with (or silently rely on) this one's venv.
-_VENV_DIR = _SKILL_DIR / f".venv-{Path(__file__).stem}"
+# One venv for the whole plugin, shared across skills/xray/ and skills/ct/.
+# Whichever script runs first creates it and installs the full union package
+# list below; every other script must carry that identical list (and a
+# transformers range intersecting [4.50,4.52)) or venv-creation order becomes
+# load-bearing.
+_VENV_DIR = _SKILL_DIR.parent / ".venv"
 _VENV_PYTHON = _VENV_DIR / "bin" / "python"
 
 
@@ -36,7 +38,7 @@ def _ensure_venv_and_reexec() -> None:
             torch_pin = f"torch=={importlib.metadata.version('torch')}"
         except importlib.metadata.PackageNotFoundError:
             torch_pin = None
-        constraints_file = _SKILL_DIR / ".uv-constraints.txt"
+        constraints_file = _SKILL_DIR.parent / ".uv-constraints.txt"
         constraints_file.write_text(f"{torch_pin}\n" if torch_pin else "")
 
         subprocess.check_call(
@@ -51,8 +53,10 @@ def _ensure_venv_and_reexec() -> None:
                 "transformers>=4.50.0,<4.52",
                 "accelerate",
                 "pillow",
-                "scikit-image",
+                "protobuf",
+                "sentencepiece",
                 "numpy",
+                "scikit-image",
                 "nibabel",
                 "simpleitk",
             ],
