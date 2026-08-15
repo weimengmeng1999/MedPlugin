@@ -31,6 +31,8 @@ const SCRIPTS = {
   xrayLongitudinal: 'xray/medgemma_longitudinal.py',
   xrayMedgemma: 'xray/medgemma_report.py',
   ctMedgemma: 'ct/medgemma_report.py',
+  ctTotalseg: 'ct/totalseg_segmentation.py',
+  mriTotalseg: 'mri/totalseg_segmentation.py',
 }
 
 /** Bytes of stdout/stderr retained for error diagnostics; older bytes are dropped. */
@@ -156,6 +158,15 @@ function renderAnatomy(value) {
 
 function renderLongitudinal(value) {
   return renderResult(value, v => (typeof v.comparison_text === 'string' ? v.comparison_text : '(no comparison_text in output)'))
+}
+
+function renderSegmentation(value) {
+  return renderResult(value, (v) => {
+    const structures = Array.isArray(v.structures_found) ? v.structures_found : []
+    const lines = [`${v.n_structures ?? structures.length} structure(s) segmented, written to ${v.output_dir}`]
+    if (structures.length > 0) lines.push(structures.join(', '))
+    return lines.join('\n')
+  })
 }
 
 /**
@@ -302,6 +313,62 @@ export function apply(ctx, config = {}) {
       cliArgs.push('--n_slices', String(args.n_slices ?? 16))
       cliArgs.push('--max_new_tokens', String(args.max_new_tokens ?? 512))
       return run(SCRIPTS.ctMedgemma, cliArgs, exec.signal)
+    },
+  }))
+
+  const segmentationParams = {
+    input: { type: 'string', required: true, description: 'Absolute path to a NIfTI volume (.nii/.nii.gz) or a directory containing one DICOM series.' },
+    output: { type: 'string', description: 'Directory to write segmentation masks into (optional — defaults to a fresh temp directory).' },
+    fast: { type: 'boolean', description: 'Use the faster, lower-resolution (3mm) model.' },
+    ml: { type: 'boolean', description: 'Also write a single multilabel NIfTI file combining every structure.' },
+    statistics: { type: 'boolean', description: 'Compute volume (mm3) and mean intensity per structure.' },
+    preview: { type: 'boolean', description: 'Generate a PNG preview of the segmentation.' },
+    roi_subset: { type: 'array', items: { type: 'string' }, description: 'Only segment these specific structures, e.g. ["liver", "kidney_right"] (optional — omit to segment everything the task covers).' },
+    gpu: { type: 'integer', description: 'GPU index (optional — auto-selected if omitted).' },
+  }
+
+  const segmentationCliArgs = (args) => {
+    const cliArgs = ['--input', args.input]
+    if (args.output !== undefined) cliArgs.push('--output', args.output)
+    if (args.fast) cliArgs.push('--fast')
+    if (args.ml) cliArgs.push('--ml')
+    if (args.statistics) cliArgs.push('--statistics')
+    if (args.preview) cliArgs.push('--preview')
+    if (args.roi_subset !== undefined && args.roi_subset.length > 0) cliArgs.push('--roi_subset', ...args.roi_subset)
+    if (args.gpu !== undefined) cliArgs.push('--gpu', String(args.gpu))
+    return cliArgs
+  }
+
+  ctx.tools.register(defineTool({
+    name: 'ct_segmentation_totalseg',
+    description: 'Segment anatomical structures in a CT volume with TotalSegmentator. Writes one NIfTI mask file per structure to an output directory and returns their paths. Whole-body organ segmentation by default (task=total); set task=lung_vessels for pulmonary vessels and airways instead, or pass roi_subset to limit either task to specific structures. Can take several minutes on GPU, longer on CPU.',
+    parameters: {
+      ...segmentationParams,
+      task: { type: 'string', enum: ['total', 'lung_vessels'], description: 'total (default) = whole-body organs. lung_vessels = pulmonary vessels and airways.' },
+    },
+    output: {
+      schema: outputSchema('success'),
+      render: (_args, value) => [{ type: 'text', text: renderSegmentation(value) }],
+    },
+    isConcurrencySafe: () => false,
+    async execute(args, exec) {
+      const cliArgs = segmentationCliArgs(args)
+      if (args.task !== undefined) cliArgs.push('--task', args.task)
+      return run(SCRIPTS.ctTotalseg, cliArgs, exec.signal)
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'mri_segmentation_totalseg',
+    description: 'Segment anatomical structures in an MRI volume with TotalSegmentator (MR-specific model). Writes one NIfTI mask file per structure to an output directory and returns their paths. Can take several minutes on GPU, longer on CPU.',
+    parameters: segmentationParams,
+    output: {
+      schema: outputSchema('success'),
+      render: (_args, value) => [{ type: 'text', text: renderSegmentation(value) }],
+    },
+    isConcurrencySafe: () => false,
+    async execute(args, exec) {
+      return run(SCRIPTS.mriTotalseg, segmentationCliArgs(args), exec.signal)
     },
   }))
 }

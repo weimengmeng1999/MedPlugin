@@ -56,6 +56,7 @@ def _ensure_venv_and_reexec() -> None:
                 "scikit-image",
                 "nibabel",
                 "simpleitk",
+                "TotalSegmentator",
             ],
         )
         print("[medgemma-ct] Venv ready.", file=sys.stderr)

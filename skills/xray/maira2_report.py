@@ -48,18 +48,6 @@ Usage:
   python maira2_report.py --input xray.png --lateral lat.png \
       --indication "Dyspnea." --technique "PA and lateral." --comparison "None." \
       --mode grounded_report --gpu 1
-
-Shared venv:
-  MAIRA-2's trust_remote_code=True modeling code (downloaded from the HF repo
-  at load time) requires transformers>=4.48.0,<4.52 (tested against 4.51.3) —
-  older than what an ambient Python environment is likely to have, which
-  breaks MAIRA-2 with cryptic AttributeErrors (e.g.
-  'Maira2ForConditionalGeneration' object has no attribute 'model'). The
-  script auto-creates skills/.venv (shared with every other script under
-  skills/) on first run using --system-site-packages (inherits torch/cuda
-  from the invoking Python), pins transformers to the compatible range
-  there, and re-execs itself inside the venv so the caller never needs to
-  activate anything manually.
 """
 
 import os
@@ -67,17 +55,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-# ── Shared venv bootstrap (runs before any heavy imports) ────────────────────
-# Keeps transformers pinned to a range every skills/ script tolerates,
-# isolated from the main project env, while inheriting torch/CUDA via
-# --system-site-packages.
-
 _SKILL_DIR   = Path(__file__).resolve().parent
-# One venv for the whole plugin, shared across skills/xray/ and skills/ct/.
-# Whichever script runs first creates it and installs the full union package
-# list below; every other script must carry that identical list (and a
-# transformers range intersecting [4.50,4.52)) or venv-creation order becomes
-# load-bearing.
 _VENV_DIR    = _SKILL_DIR.parent / ".venv"
 _VENV_PYTHON = _VENV_DIR / "bin" / "python"
 
@@ -110,7 +88,7 @@ def _ensure_venv_and_reexec():
              "--constraint", str(constraints_file),
              "transformers>=4.50.0,<4.52", "accelerate", "pillow",
              "protobuf", "sentencepiece", "numpy", "scikit-image",
-             "nibabel", "simpleitk"],
+             "nibabel", "simpleitk", "TotalSegmentator"],
         )
         print("[maira-2] Venv ready.", file=sys.stderr)
 
@@ -119,10 +97,6 @@ def _ensure_venv_and_reexec():
 
 
 _ensure_venv_and_reexec()
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Everything below runs only inside the isolated venv.
-# ─────────────────────────────────────────────────────────────────────────────
 
 import argparse
 import json

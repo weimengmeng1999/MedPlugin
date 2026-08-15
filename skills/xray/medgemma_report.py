@@ -28,7 +28,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-# ── Shared venv bootstrap ─────────────────────────────────────────────────────
 _SKILL_DIR   = Path(__file__).resolve().parent
 _VENV_DIR    = _SKILL_DIR.parent / ".venv"
 _VENV_PYTHON = _VENV_DIR / "bin" / "python"
@@ -59,7 +58,7 @@ def _ensure_venv_and_reexec():
              "--constraint", str(constraints_file),
              "transformers>=4.50.0,<4.52", "accelerate", "pillow",
              "protobuf", "sentencepiece", "numpy", "scikit-image",
-             "nibabel", "simpleitk"],
+             "nibabel", "simpleitk", "TotalSegmentator"],
         )
         print("[medgemma-report] Venv ready.", file=sys.stderr)
 

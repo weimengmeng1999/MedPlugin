@@ -17,20 +17,6 @@ Default anatomy set (Chest ImaGenome):
   right upper lung zone, right mid lung zone, right lower lung zone,
   left upper lung zone, left mid lung zone, left lower lung zone
 
-Shared venv:
-  The script auto-creates skills/.venv (shared with every other script under
-  skills/) on first run using --system-site-packages (inherits torch/cuda
-  from the invoking Python) and installs transformers>=4.50.0,<4.52 (required
-  for the gemma3 architecture). It then re-execs itself inside the venv so
-  the caller never needs to activate anything manually.
-
-Requirements (ambient Python):
-  torch  (inherited via --system-site-packages)
-
-Venv requirements (auto-installed on first run):
-  transformers>=4.50.0,<4.52  accelerate  pillow  protobuf  sentencepiece
-  numpy  scikit-image  nibabel  simpleitk
-
 Usage:
   python medgemma_anatomy_localization.py --input chest.png
   python medgemma_anatomy_localization.py --input chest.png --anatomy "right lung" "left lung"
@@ -43,17 +29,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-# ── Shared venv bootstrap (runs before any heavy imports) ────────────────────
-# Keeps transformers pinned to a range every skills/ script tolerates,
-# isolated from the main project env, while inheriting torch/CUDA via
-# --system-site-packages.
-
 _SKILL_DIR   = Path(__file__).resolve().parent
-# One venv for the whole plugin, shared across skills/xray/ and skills/ct/.
-# Whichever script runs first creates it and installs the full union package
-# list below; every other script must carry that identical list (and a
-# transformers range intersecting [4.50,4.52)) or venv-creation order becomes
-# load-bearing.
 _VENV_DIR    = _SKILL_DIR.parent / ".venv"
 _VENV_PYTHON = _VENV_DIR / "bin" / "python"
 
@@ -86,7 +62,7 @@ def _ensure_venv_and_reexec():
              "--constraint", str(constraints_file),
              "transformers>=4.50.0,<4.52", "accelerate", "pillow",
              "protobuf", "sentencepiece", "numpy", "scikit-image",
-             "nibabel", "simpleitk"],
+             "nibabel", "simpleitk", "TotalSegmentator"],
         )
         print("[medgemma-loc] Venv ready.", file=sys.stderr)
 
@@ -95,10 +71,6 @@ def _ensure_venv_and_reexec():
 
 
 _ensure_venv_and_reexec()
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Everything below runs only inside the isolated venv.
-# ─────────────────────────────────────────────────────────────────────────────
 
 import argparse
 import json

@@ -30,11 +30,6 @@ Differences from the single-image report script (medgemma_report.py):
     "cuda:N" string) -- see medgemma_report.py's own comment for the
     confirmed OOM bug this avoids on a shared GPU box.
 
-Shared venv:
-  Reuses the same skills/.venv as the other scripts under skills/
-  (transformers>=4.50.0,<4.52 already required there for gemma3/MedGemma
-  1.5 architecture) -- auto-created on first run if it doesn't exist yet.
-
 Usage:
   python medgemma_longitudinal.py --input current.png --prior prior.png
 
@@ -47,13 +42,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-# ── Shared venv bootstrap ─────────────────────────────────────────────────────
 _SKILL_DIR   = Path(__file__).resolve().parent
-# One venv for the whole plugin, shared across skills/xray/ and skills/ct/.
-# Whichever script runs first creates it and installs the full union package
-# list below; every other script must carry that identical list (and a
-# transformers range intersecting [4.50,4.52)) or venv-creation order becomes
-# load-bearing.
 _VENV_DIR    = _SKILL_DIR.parent / ".venv"
 _VENV_PYTHON = _VENV_DIR / "bin" / "python"
 
@@ -83,7 +72,7 @@ def _ensure_venv_and_reexec():
              "--constraint", str(constraints_file),
              "transformers>=4.50.0,<4.52", "accelerate", "pillow",
              "protobuf", "sentencepiece", "numpy", "scikit-image",
-             "nibabel", "simpleitk"],
+             "nibabel", "simpleitk", "TotalSegmentator"],
         )
         print("[medgemma-longitudinal] Venv ready.", file=sys.stderr)
 
@@ -92,31 +81,10 @@ def _ensure_venv_and_reexec():
 
 _ensure_venv_and_reexec()
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Everything below runs only inside the isolated venv.
-# ─────────────────────────────────────────────────────────────────────────────
 
 import argparse
 import json
 import time
-
-
-# ── Prompt ────────────────────────────────────────────────────────────────────
-# The official notebook itself sends no system turn at all for this task, so
-# adding this one is additive, not a deviation from a documented pattern.
-#
-# The comparison instruction below steers toward MedGemma 1.5's documented
-# categories/pathologies without claiming a validated structured-output
-# format -- output is freeform comparison text, matching what the official
-# notebook itself demonstrates.
-#
-# Unlike the notebook's own prompt (which never states which image is
-# which), this explicitly labels image order -- the notebook relies on
-# an implicit "image1=before, image2=after" convention it never puts in
-# the text sent to the model. Leaving that unlabeled risks the model
-# reading the two images in the wrong temporal direction and inverting
-# every improved/worsened call, so the labels below are a correctness
-# fix, not a stylistic addition.
 
 _SYSTEM_PROMPT = "You are a helpful radiology assistant."
 
