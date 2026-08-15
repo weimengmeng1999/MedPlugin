@@ -97,7 +97,7 @@ def collect_outputs(output_dir: Path, task: str) -> dict:
         "n_structures": len(structures_found),
         "multilabel_file": None,
         "statistics_file": None,
-        "preview_image": None,
+        "preview_image_path": None,
     }
 
     multilabel = output_dir / "multilabel.nii.gz"
@@ -111,7 +111,7 @@ def collect_outputs(output_dir: Path, task: str) -> dict:
 
     preview = output_dir / "preview.png"
     if preview.exists():
-        result["preview_image"] = str(preview)
+        result["preview_image_path"] = str(preview)
 
     return result
 

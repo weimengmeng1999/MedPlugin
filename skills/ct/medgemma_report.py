@@ -197,16 +197,20 @@ def main() -> None:
     parser.add_argument("--gpu", "-g", type=int, default=0)
     parser.add_argument("--n_slices", type=int, default=16)
     parser.add_argument("--max_new_tokens", type=int, default=512)
-    parser.add_argument("--montage_output", default=None)
+    parser.add_argument("--montage_output", default=None,
+                        help="Path to save the axial-slice montage PNG (optional, default: a temp file)")
     args = parser.parse_args()
 
     t0 = time.time()
     try:
         nifti_path = resolve_nifti(args.input)
         montage = make_axial_montage(nifti_path, args.n_slices)
-        if args.montage_output:
-            Path(args.montage_output).parent.mkdir(parents=True, exist_ok=True)
-            montage.save(args.montage_output)
+        montage_path = (
+            Path(args.montage_output) if args.montage_output
+            else Path(tempfile.mkdtemp(prefix="medgemma_ct_montage_")) / "preview.png"
+        )
+        montage_path.parent.mkdir(parents=True, exist_ok=True)
+        montage.save(str(montage_path))
         pipe = load_pipeline(args.gpu, args.model)
         report_text = run_report(pipe, montage, args.indication, args.max_new_tokens)
     except Exception as exc:
@@ -221,6 +225,7 @@ def main() -> None:
         "image_path": args.input,
         "resolved_nifti_path": nifti_path,
         "report_text": report_text,
+        "preview_image_path": str(montage_path),
         "elapsed_seconds": round(time.time() - t0, 2),
         "research_only": True,
     }

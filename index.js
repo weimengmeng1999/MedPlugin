@@ -371,7 +371,8 @@ export function apply(ctx, config = {}) {
       if (args.indication !== undefined) cliArgs.push('--indication', args.indication)
       cliArgs.push('--n_slices', String(args.n_slices ?? 16))
       cliArgs.push('--max_new_tokens', String(args.max_new_tokens ?? 512))
-      return run(SCRIPTS.ctMedgemma, cliArgs, exec.signal)
+      const value = await run(SCRIPTS.ctMedgemma, cliArgs, exec.signal)
+      return attachPreview(ctx, exec, value)
     },
   }))
 
@@ -381,7 +382,7 @@ export function apply(ctx, config = {}) {
     fast: { type: 'boolean', description: 'Use the faster, lower-resolution (3mm) model.' },
     ml: { type: 'boolean', description: 'Also write a single multilabel NIfTI file combining every structure.' },
     statistics: { type: 'boolean', description: 'Compute volume (mm3) and mean intensity per structure.' },
-    preview: { type: 'boolean', description: 'Generate a PNG preview of the segmentation.' },
+    preview: { type: 'boolean', description: 'Generate a PNG preview of the segmentation (default true; TotalSegmentator renders it, so it needs a headless-display-capable environment — set false if that fails).' },
     roi_subset: { type: 'array', items: { type: 'string' }, description: 'Only segment these specific structures, e.g. ["liver", "kidney_right"] (optional — omit to segment everything the task covers).' },
     gpu: { type: 'integer', description: 'GPU index (optional — auto-selected if omitted).' },
   }
@@ -392,7 +393,7 @@ export function apply(ctx, config = {}) {
     if (args.fast) cliArgs.push('--fast')
     if (args.ml) cliArgs.push('--ml')
     if (args.statistics) cliArgs.push('--statistics')
-    if (args.preview) cliArgs.push('--preview')
+    if (args.preview ?? true) cliArgs.push('--preview')
     if (args.roi_subset !== undefined && args.roi_subset.length > 0) cliArgs.push('--roi_subset', ...args.roi_subset)
     if (args.gpu !== undefined) cliArgs.push('--gpu', String(args.gpu))
     return cliArgs
@@ -413,7 +414,8 @@ export function apply(ctx, config = {}) {
     async execute(args, exec) {
       const cliArgs = segmentationCliArgs(args)
       if (args.task !== undefined) cliArgs.push('--task', args.task)
-      return run(SCRIPTS.ctTotalseg, cliArgs, exec.signal)
+      const value = await run(SCRIPTS.ctTotalseg, cliArgs, exec.signal)
+      return attachPreview(ctx, exec, value)
     },
   }))
 
@@ -427,7 +429,8 @@ export function apply(ctx, config = {}) {
     },
     isConcurrencySafe: () => false,
     async execute(args, exec) {
-      return run(SCRIPTS.mriTotalseg, segmentationCliArgs(args), exec.signal)
+      const value = await run(SCRIPTS.mriTotalseg, segmentationCliArgs(args), exec.signal)
+      return attachPreview(ctx, exec, value)
     },
   }))
 }

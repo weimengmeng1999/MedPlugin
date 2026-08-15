@@ -30,6 +30,12 @@ All seven scripts share one venv at `skills/.venv`. Whichever tool runs first cr
 | `ct_segmentation_totalseg` | CT | Organ/structure segmentation — TotalSegmentator (whole-body organs by default, or `lung_vessels` for pulmonary vasculature) |
 | `mri_segmentation_totalseg` | MRI | Organ/structure segmentation — TotalSegmentator's MR-specific model |
 
+## Preview images
+
+Every tool also produces a 2D preview PNG alongside its text/file result — a real thing to look at, not just paths. On the X-ray tools this is the input image itself, or (`xray_report_maira`, `xray_anatomy_localization`) that image annotated with the bounding boxes the model found; `xray_longitudinal_comparison` composites prior and current side by side. Neither CT nor MRI input is directly viewable as a 2D image, so each of those tools reuses a 2D projection its own pipeline already produces for a different reason: `ct_report_medgemma`'s preview is the exact axial-slice montage MedGemma itself was shown (a tiled grid of windowed slices — the model is a 2D vision-language model, so this montage is the real mechanism by which it "sees" a volume at all); the two `_totalseg` tools' preview is TotalSegmentator's own `--preview` renderer, a multi-planar snapshot of the segmentation overlaid on the volume. In both segmentation tools the preview shows *that* a structure was found and roughly *where* — the actual segmentation masks stay as 3D NIfTI files (`segmentation_files` in the result), which no chat UI can render inline.
+
+The preview only reaches the conversation when the active model route declares image input; on a text-only route (e.g. the plain DeepSeek chat-completions adapter) the tool call still returns its full text/file result, just without the image attached.
+
 ## Requirements
 
 - A deepseek-harness `dsh` installation.
