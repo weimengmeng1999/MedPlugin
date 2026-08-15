@@ -1,4 +1,4 @@
-import { existsSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import { spawn } from 'node:child_process'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 
@@ -7,10 +7,10 @@ export const inject = ['tools']
 
 /**
  * @typedef {object} Config
- * @property {string} [baseDir] Root skills_scripts/ directory each entry in
- *   SCRIPTS is relative to (a MedOmni checkout's skills_scripts/ directory).
- *   Falls back to the MEDPLUGIN_SKILLS_DIR environment variable; the plugin
- *   refuses to load if neither is set or the directory doesn't exist.
+ * @property {string} [skillsDir] Directory containing this package's
+ *   skills/ subfolders. Defaults to the skills/ directory shipped inside
+ *   this package — override only to point at a different checkout of these
+ *   scripts.
  * @property {string} [pythonBin] Python interpreter to invoke each script
  *   with (each script re-execs itself into its own isolated venv on first
  *   run). Default "python3".
@@ -21,13 +21,10 @@ export const inject = ['tools']
 
 const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000
 
-/**
- * Script locations, mirroring the BASE_DIR + *_SCRIPT constants in
- * MedOmni's medomni/med_teams/xray_team.py so this plugin calls the exact
- * same scripts xray_team.py's build_xray_specialist_tools() does. Scoped to
- * just MAIRA-2 and MedGemma 1.5 — see README for the other specialist
- * scripts xray_team.py exposes that this package deliberately leaves out.
- */
+/** Directory this module lives in, so the shipped skills/ scripts resolve regardless of the caller's cwd. */
+const PACKAGE_DIR = fileURLToPath(new URL('.', import.meta.url))
+
+/** Script locations, relative to skillsDir. */
 const SCRIPTS = {
   maira: 'xray_grounding/run_xray_grounding_maira.py',
   anatomy: 'medgemma_multimodal/run_xray_anatomy_localization.py',
@@ -163,22 +160,12 @@ function renderLongitudinal(value) {
  * @param {Config} [config]
  */
 export function apply(ctx, config = {}) {
-  const baseDir = config.baseDir ?? process.env.MEDPLUGIN_SKILLS_DIR
-  if (!baseDir) {
-    throw new Error(
-      'xray-report-generation: no skills scripts directory configured. Set `baseDir` in this plugin\'s '
-      + 'cordis config, or the MEDPLUGIN_SKILLS_DIR environment variable, to your MedOmni checkout\'s '
-      + 'skills_scripts/ directory (e.g. /path/to/MedOmni/skills_scripts). See this plugin\'s README for setup.',
-    )
-  }
-  if (!existsSync(baseDir)) {
-    throw new Error(`xray-report-generation: configured skills scripts directory does not exist: ${baseDir}`)
-  }
+  const skillsDir = config.skillsDir ?? `${PACKAGE_DIR}skills`
   const pythonBin = config.pythonBin ?? 'python3'
   const timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS
 
   const run = (relScript, args, signal) => {
-    const scriptPath = `${baseDir}/${relScript}`
+    const scriptPath = `${skillsDir}/${relScript}`
     const cwd = scriptPath.slice(0, scriptPath.lastIndexOf('/'))
     return runPythonScript({ pythonBin, scriptPath, args, cwd, timeoutMs, signal })
   }

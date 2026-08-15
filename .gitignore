@@ -1,3 +1,10 @@
 node_modules/
 *.log
 .DS_Store
+
+# Each skills/ script re-execs itself into its own isolated venv on first
+# run (see README's "Is setup automated?") and writes a torch-version pin
+# next to itself — neither belongs in version control.
+skills/**/.venv/
+skills/**/__pycache__/
+skills/**/.uv-constraints.txt
