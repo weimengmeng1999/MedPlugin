@@ -5,8 +5,8 @@ Applies CT-specific windowing per --site. Single-slice by default; --all_slices
 processes every slice and reconstructs a 3D binary NIfTI mask per prompt.
 
 Usage:
-  python biomedparse_segmentation.py --input ct.nii.gz --prompts "liver,kidney" --site abdomen --slice_idx 68
-  python biomedparse_segmentation.py --input ct.nii.gz --prompts "liver" --site abdomen --all_slices
+  python biomedparse_segmentation.py --input ct.nii.gz --prompts liver kidney --site abdomen --slice_idx 68
+  python biomedparse_segmentation.py --input ct.nii.gz --prompts liver --site abdomen --all_slices
 """
 
 import sys
@@ -27,8 +27,8 @@ _core.ensure_ready("biomedparse-ct")
 
 def main():
     parser = argparse.ArgumentParser(description="BiomedParse segmentation for CT volumes")
-    parser.add_argument("--input", required=True, help="NIfTI volume (.nii or .nii.gz) or DICOM series directory")
-    parser.add_argument("--prompts", required=True, help="Comma-separated structures/findings, e.g. 'liver,kidney'")
+    parser.add_argument("--input", required=True, help="NIfTI volume (.nii or .nii.gz) — DICOM is not accepted")
+    parser.add_argument("--prompts", required=True, nargs="+", help="One or more structures/findings, e.g. --prompts liver kidney")
     parser.add_argument("--site", required=True, choices=["abdomen", "lung", "pelvis", "liver", "colon", "pancreas"],
                          help="Anatomical site, for CT windowing")
     parser.add_argument("--slice_idx", type=int, default=None, help="Slice index (defaults to the middle slice)")
@@ -39,10 +39,12 @@ def main():
     parser.add_argument("--gpu", type=int, default=0)
     args = parser.parse_args()
 
-    prompts = [p.strip() for p in args.prompts.split(",") if p.strip()]
-    result = _core.run_3d(args.input, prompts, True, args.site, args.slice_idx, args.all_slices,
-                           None, args.output_dir, args.gpu, args.threshold,
-                           tag="biomedparse-ct", modality="ct")
+    try:
+        result = _core.run_3d(args.input, args.prompts, True, args.site, args.slice_idx, args.all_slices,
+                               None, args.output_dir, args.gpu, args.threshold,
+                               tag="biomedparse-ct", modality="ct")
+    except Exception as e:
+        result = {"status": "error", "error": str(e)}
     print(json.dumps(result))
     sys.exit(0 if result["status"] == "success" else 1)
 

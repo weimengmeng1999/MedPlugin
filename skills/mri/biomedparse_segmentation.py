@@ -27,8 +27,8 @@ _core.ensure_ready("biomedparse-mri")
 
 def main():
     parser = argparse.ArgumentParser(description="BiomedParse segmentation for MRI volumes")
-    parser.add_argument("--input", required=True, help="NIfTI volume (.nii or .nii.gz) or DICOM series directory")
-    parser.add_argument("--prompts", required=True, help="Comma-separated structures/findings, e.g. 'tumor core,enhancing tumor'")
+    parser.add_argument("--input", required=True, help="NIfTI volume (.nii or .nii.gz) — DICOM is not accepted")
+    parser.add_argument("--prompts", required=True, nargs="+", help="One or more structures/findings, e.g. --prompts \"tumor core\" \"enhancing tumor\"")
     parser.add_argument("--slice_idx", type=int, default=None, help="Slice index (defaults to the middle slice)")
     parser.add_argument("--all_slices", action="store_true", default=False,
                          help="Process every slice and reconstruct a 3D NIfTI mask per prompt (slow — one model call per slice per prompt)")
@@ -38,10 +38,12 @@ def main():
     parser.add_argument("--gpu", type=int, default=0)
     args = parser.parse_args()
 
-    prompts = [p.strip() for p in args.prompts.split(",") if p.strip()]
-    result = _core.run_3d(args.input, prompts, False, None, args.slice_idx, args.all_slices,
-                           args.channel_idx, args.output_dir, args.gpu, args.threshold,
-                           tag="biomedparse-mri", modality="mri")
+    try:
+        result = _core.run_3d(args.input, args.prompts, False, None, args.slice_idx, args.all_slices,
+                               args.channel_idx, args.output_dir, args.gpu, args.threshold,
+                               tag="biomedparse-mri", modality="mri")
+    except Exception as e:
+        result = {"status": "error", "error": str(e)}
     print(json.dumps(result))
     sys.exit(0 if result["status"] == "success" else 1)
 

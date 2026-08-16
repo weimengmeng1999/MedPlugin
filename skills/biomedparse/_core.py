@@ -268,6 +268,8 @@ def run_2d(input_path, prompts, output_dir, gpu, tag, modality):
         return {"status": "error", "error": "No prompts provided"}
     if not Path(input_path).exists():
         return {"status": "error", "error": f"Input not found: {input_path}"}
+    if str(input_path).lower().endswith(".dcm"):
+        return {"status": "error", "error": f"BiomedParse does not accept DICOM (.dcm) input: {input_path}. Convert to PNG/JPG first."}
 
     import torch
     device = f"cuda:{gpu}" if gpu >= 0 and torch.cuda.is_available() else "cpu"
@@ -327,6 +329,8 @@ def run_3d(input_path, prompts, is_ct, site, slice_idx, all_slices, channel_idx,
         return {"status": "error", "error": "No prompts provided"}
     if not Path(input_path).exists():
         return {"status": "error", "error": f"Input not found: {input_path}"}
+    if not str(input_path).endswith((".nii", ".nii.gz")):
+        return {"status": "error", "error": f"BiomedParse only accepts a NIfTI volume (.nii/.nii.gz), not: {input_path}. For a DICOM series, convert it first or use the _totalseg tool for this modality."}
 
     out_dir = Path(output_dir) if output_dir else Path(
         __import__("tempfile").mkdtemp(prefix=f"biomedparse_{modality}_"))

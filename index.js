@@ -209,9 +209,18 @@ function renderBiomedparse3d(value) {
   const text = renderResult(value, (v) => {
     const slices = Array.isArray(v.slices) ? v.slices : []
     const lines = [`${v.n_slices_processed ?? slices.length} of ${v.n_slices_total} slice(s) processed.`]
+    // Summarize per prompt rather than per slice — all_slices mode can process hundreds of slices, and a line each would flood the conversation.
+    const byPrompt = new Map()
     for (const slice of slices) {
-      const prompts = Array.isArray(slice.prompts) ? slice.prompts : []
-      lines.push(`slice ${slice.slice_idx}: ` + prompts.map(p => `${p.prompt} (${(p.coverage * 100).toFixed(1)}%)`).join(', '))
+      for (const p of (Array.isArray(slice.prompts) ? slice.prompts : [])) {
+        const stat = byPrompt.get(p.prompt) ?? { maxCoverage: 0, nonzeroSlices: 0 }
+        if (p.coverage > 0) stat.nonzeroSlices += 1
+        stat.maxCoverage = Math.max(stat.maxCoverage, p.coverage)
+        byPrompt.set(p.prompt, stat)
+      }
+    }
+    for (const [prompt, stat] of byPrompt) {
+      lines.push(`${prompt}: found on ${stat.nonzeroSlices} of ${slices.length} processed slice(s), max coverage ${(stat.maxCoverage * 100).toFixed(1)}%`)
     }
     const masks = v.nifti_masks !== undefined && typeof v.nifti_masks === 'object' ? Object.entries(v.nifti_masks) : []
     if (masks.length > 0) lines.push('3D NIfTI masks: ' + masks.map(([prompt, path]) => `${prompt} -> ${path}`).join(', '))
@@ -508,14 +517,14 @@ export function apply(ctx, config = {}) {
   const BIOMEDPARSE_SETUP_NOTE = 'The first BiomedParse call on this machine clones the model repo, installs ~15 extra Python packages plus a from-source detectron2 build (one-time, ~1-2 minutes), and downloads ~1.5GB of ungated weights (no token needed) — later calls skip straight to inference.'
 
   const biomedparse2dParams = {
-    input: { type: 'string', required: true, description: 'Absolute path to the image (PNG, JPG, or DICOM .dcm).' },
+    input: { type: 'string', required: true, description: 'Absolute path to the image (PNG or JPG — unlike the MAIRA-2/MedGemma tools, BiomedParse does not accept DICOM .dcm).' },
     prompts: { type: 'array', items: { type: 'string' }, required: true, description: 'Findings or structures to segment, e.g. ["consolidation", "pleural effusion"]. One overlay is generated per prompt.' },
     output_dir: { type: 'string', description: 'Directory to write overlay/mask images into (optional — defaults to a fresh temp directory).' },
     gpu: { type: 'integer', description: 'GPU index (-1 for CPU). Default 0.' },
   }
 
   const biomedparse2dCliArgs = args => {
-    const cliArgs = ['--input', args.input, '--prompts', args.prompts.join(','), '--gpu', String(args.gpu ?? 0)]
+    const cliArgs = ['--input', args.input, '--gpu', String(args.gpu ?? 0), '--prompts', ...args.prompts]
     if (args.output_dir !== undefined) cliArgs.push('--output_dir', args.output_dir)
     return cliArgs
   }
@@ -557,7 +566,7 @@ export function apply(ctx, config = {}) {
   }))
 
   const biomedparse3dParams = {
-    input: { type: 'string', required: true, description: 'Absolute path to a NIfTI volume (.nii/.nii.gz) or a directory containing one DICOM series.' },
+    input: { type: 'string', required: true, description: 'Absolute path to a NIfTI volume (.nii or .nii.gz). Unlike the _totalseg tools, BiomedParse does not accept a DICOM directory — convert to NIfTI first, or use the _totalseg tool for this modality.' },
     prompts: { type: 'array', items: { type: 'string' }, required: true, description: 'Findings or structures to segment, e.g. ["liver", "kidney"].' },
     slice_idx: { type: 'integer', description: 'Slice index along the depth axis (optional — defaults to the middle slice).' },
     all_slices: { type: 'boolean', description: 'Process every slice and reconstruct a 3D NIfTI mask per prompt, instead of just one slice. One model call per prompt per slice — slow and produces one overlay PNG per prompt per slice; only set this when a full-volume mask is actually needed.' },
@@ -567,11 +576,12 @@ export function apply(ctx, config = {}) {
   }
 
   const biomedparse3dCliArgs = args => {
-    const cliArgs = ['--input', args.input, '--prompts', args.prompts.join(','), '--gpu', String(args.gpu ?? 0)]
+    const cliArgs = ['--input', args.input, '--gpu', String(args.gpu ?? 0)]
     if (args.slice_idx !== undefined) cliArgs.push('--slice_idx', String(args.slice_idx))
     if (args.all_slices) cliArgs.push('--all_slices')
     if (args.threshold !== undefined) cliArgs.push('--threshold', String(args.threshold))
     if (args.output_dir !== undefined) cliArgs.push('--output_dir', args.output_dir)
+    cliArgs.push('--prompts', ...args.prompts)
     return cliArgs
   }
 

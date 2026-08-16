@@ -3,7 +3,7 @@
 BiomedParse (microsoft/BiomedParse) text-prompted segmentation for ultrasound.
 
 Usage:
-  python biomedparse_segmentation.py --input scan.png --prompts "gallstone,gallbladder wall"
+  python biomedparse_segmentation.py --input scan.png --prompts gallstone "gallbladder wall"
 """
 
 import sys
@@ -25,14 +25,16 @@ _core.ensure_ready("biomedparse-ultrasound")
 def main():
     parser = argparse.ArgumentParser(description="BiomedParse segmentation for ultrasound")
     parser.add_argument("--input", required=True, help="Path to the ultrasound image")
-    parser.add_argument("--prompts", required=True, help="Comma-separated structures/findings, e.g. 'gallstone,gallbladder wall'")
+    parser.add_argument("--prompts", required=True, nargs="+", help="One or more structures/findings, e.g. --prompts gallstone \"gallbladder wall\"")
     parser.add_argument("--output_dir", default=None)
     parser.add_argument("--gpu", type=int, default=0)
     args = parser.parse_args()
 
-    prompts = [p.strip() for p in args.prompts.split(",") if p.strip()]
-    result = _core.run_2d(args.input, prompts, args.output_dir, args.gpu,
-                           tag="biomedparse-ultrasound", modality="ultrasound")
+    try:
+        result = _core.run_2d(args.input, args.prompts, args.output_dir, args.gpu,
+                               tag="biomedparse-ultrasound", modality="ultrasound")
+    except Exception as e:
+        result = {"status": "error", "error": str(e)}
     print(json.dumps(result))
     sys.exit(0 if result["status"] == "success" else 1)
 

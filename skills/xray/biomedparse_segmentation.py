@@ -3,7 +3,7 @@
 BiomedParse (microsoft/BiomedParse) text-prompted segmentation for chest X-ray.
 
 Usage:
-  python biomedparse_segmentation.py --input chest.png --prompts "consolidation,pleural effusion"
+  python biomedparse_segmentation.py --input chest.png --prompts consolidation "pleural effusion"
 """
 
 import sys
@@ -25,14 +25,16 @@ _core.ensure_ready("biomedparse-xray")
 def main():
     parser = argparse.ArgumentParser(description="BiomedParse segmentation for chest X-ray")
     parser.add_argument("--input", required=True, help="Path to the chest X-ray image")
-    parser.add_argument("--prompts", required=True, help="Comma-separated findings/structures, e.g. 'consolidation,pleural effusion'")
+    parser.add_argument("--prompts", required=True, nargs="+", help="One or more findings/structures, e.g. --prompts consolidation \"pleural effusion\"")
     parser.add_argument("--output_dir", default=None)
     parser.add_argument("--gpu", type=int, default=0)
     args = parser.parse_args()
 
-    prompts = [p.strip() for p in args.prompts.split(",") if p.strip()]
-    result = _core.run_2d(args.input, prompts, args.output_dir, args.gpu,
-                           tag="biomedparse-xray", modality="xray")
+    try:
+        result = _core.run_2d(args.input, args.prompts, args.output_dir, args.gpu,
+                               tag="biomedparse-xray", modality="xray")
+    except Exception as e:
+        result = {"status": "error", "error": str(e)}
     print(json.dumps(result))
     sys.exit(0 if result["status"] == "success" else 1)
 
