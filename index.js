@@ -3,7 +3,7 @@ import { spawn } from 'node:child_process'
 import { readFile } from 'node:fs/promises'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 
-export const name = 'xray-report-generation'
+export const name = 'medplugin'
 export const inject = ['tools']
 
 /**

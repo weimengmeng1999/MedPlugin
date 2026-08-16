@@ -62,6 +62,94 @@ In every segmentation tool (`_totalseg` and `_biomedparse` alike) the preview sh
 
 The preview only reaches the conversation when the active model route declares image input; on a text-only route (e.g. the plain DeepSeek chat-completions adapter) the tool call still returns its full text/file result, just without the image attached.
 
+## Install and use
+
+### 1. Install
+
+```sh
+dsh plugin --profile <your-profile> add github:weimengmeng1999/MedPlugin
+```
+
+Or from a local checkout (useful while developing this repo itself):
+
+```sh
+dsh plugin --profile <your-profile> add /path/to/MedPlugin
+```
+
+Either form adds `dsh-medplugin` to your profile's `package.json` `dependencies` and `dsh.profile.bundles`, and installs `cordis.patch.yml` (mounting the plugin under id `medplugin`) automatically — see [package and install a plugin](https://deepseek-harness.github.io/deepseek-harness/en/develop/basic/publish) for how bundles and profiles compose. The `github:` form works because this package ships plain `.js`/`.py` with no build step, so there's nothing for a `prepare` script to compile. Restart `dsh` (or your DSH Desktop/web session) afterward so the new bundle loads.
+
+### 2. First run
+
+Nothing needs to be pre-built or downloaded before your first tool call — every stage below happens automatically, the first time it's needed, inside whichever tool call triggers it. What you'll see on `stderr` at each stage:
+
+| Stage | Trigger | What happens | You'll see |
+|---|---|---|---|
+| Shared venv | Any tool's first call, ever | `uv venv` creates `skills/.venv`, pins `torch` to the ambient version, installs the base dependency set | `[<tool-tag>] Creating venv ...` then `... Venv ready.` |
+| Model weights | A MAIRA-2/MedGemma tool's first call | Downloads from HuggingFace via `from_pretrained` (gated — see [Requirements](#requirements)) | Standard `huggingface_hub` download progress |
+| BiomedParse repo + deps | Any `_segmentation_biomedparse` tool's first call | Clones `microsoft/BiomedParse`'s `inference` branch, installs ~15 extra packages, builds `detectron2` from source (~1-2 min) | `[biomedparse-<modality>] Cloning BiomedParse inference branch ...`, `... Installing biomedparse-deps dependencies ...`, `... Installing biomedparse-detectron2 dependencies ...` |
+| BiomedParse weights | Same first call, right after | Downloads `biomedparse_v1.pt` (~1.7GB, ungated) from HuggingFace | `[biomedparse-<modality>] Downloading biomedparse_v1.pt from microsoft/BiomedParse ...` |
+
+The shared-venv stage only happens once total, regardless of which tool triggers it. The BiomedParse stage only happens once total across all five `_biomedparse` tools (the marker files it leaves in `skills/.venv/` are what make the second `_biomedparse` call, and every call after, skip straight to inference). Run `dsh-medplugin doctor` at any point to see exactly which of these stages has completed (see [Troubleshooting](#troubleshooting)).
+
+### 3. Usage examples
+
+These are real tool calls, not a hypothetical — ask your agent something like the phrasing below and it picks the matching tool itself.
+
+**Chest X-ray report:**
+> "Generate a radiology report for this chest X-ray: `/path/to/chest_xray.png`"
+
+calls `xray_report_medgemma` (or `xray_report_maira` for a grounded report with bounding boxes), and returns findings text plus an annotated preview image when your active model route supports image input.
+
+**Find something specific in an image, by name, on any of the five modalities:**
+> "Does this chest X-ray show consolidation or pleural effusion?"
+> "Segment the gallstone in this ultrasound image."
+> "Are there any microaneurysms in this fundus photo?"
+
+calls `xray_segmentation_biomedparse` / `ultrasound_segmentation_biomedparse` / `retinal_segmentation_biomedparse` with your finding as the `prompts` argument, and returns a coverage percentage plus an overlay per prompt — BiomedParse takes any free-text finding or anatomical structure, not a fixed list.
+
+**Whole-body organ segmentation on a CT or MRI volume:**
+> "Segment the liver and kidneys in this CT scan: `/path/to/scan.nii.gz`"
+
+calls `ct_segmentation_totalseg` for the fixed anatomical-structure list, or `ct_segmentation_biomedparse` (with `site: "abdomen"`) if you'd rather name a pathology than an organ — writes one NIfTI mask per structure/prompt plus a preview showing where they landed.
+
+**Prior-vs-current comparison:**
+> "Compare this current chest X-ray to the prior one and describe interval change."
+
+calls `xray_longitudinal_comparison` with both images, and returns Improved/Stable/Worsened findings across the documented pathology categories.
+
+### Troubleshooting
+
+`dsh-medplugin doctor` checks this machine's setup without calling any model — whether `uv`/`git`/`python3` are on `PATH`, whether the shared venv exists, and how far BiomedParse's one-time setup has progressed. Installing this plugin already installs the CLI as a dependency, so run it from your profile directory:
+
+```sh
+cd ~/.dsh/profiles/<your-profile>
+./node_modules/.bin/dsh-medplugin doctor
+```
+
+or, against a local checkout of this repo directly:
+
+```sh
+node /path/to/MedPlugin/lib/doctor-cli.js
+```
+
+```
+skills/: /path/to/MedPlugin/skills
+✓ uv — uv 0.10.7
+✓ git — git version 2.34.1
+✓ python3 — Python 3.12.12
+
+✓ shared venv
+    torch pin: torch==2.10.0
+    torch 2.10.0+cu128, CUDA available: true
+
+✓ BiomedParse repo cloned
+✓ BiomedParse extra dependencies installed
+✓ detectron2 built
+✓ BiomedParse weights downloaded — 1.7GB
+```
+
+A `✗` line names exactly what's missing and why it matters (e.g. `git not found on PATH (required to clone the BiomedParse model repo)`). An unchecked BiomedParse line is not itself an error — that stage only runs on a `_biomedparse` tool's first call (see [First run](#2-first-run)) — but is the first place to look if such a call fails. Pass `--skills-dir <path>` if your profile overrides the plugin's default `skillsDir` (see [Configure](#configure)).
+
 ## Requirements
 
 - A deepseek-harness `dsh` installation.
@@ -74,44 +162,18 @@ The preview only reaches the conversation when the active model route declares i
 - For `ct_report_medgemma`: `nibabel` and `simpleitk` (installed into the shared venv, also automatic) convert a `.nii`/`.nii.gz` volume or a DICOM series into the axial-slice montage MedGemma actually sees.
 - For the `_totalseg` tools: TotalSegmentator downloads its own nnU-Net model weights on first use, separately from the HuggingFace weights above and without needing `HF_TOKEN`.
 
-## Install
-
-```sh
-dsh plugin --profile <your-profile> add github:weimengmeng1999/MedPlugin
-```
-
-Or from a local checkout:
-
-```sh
-dsh plugin --profile <your-profile> add /path/to/MedPlugin
-```
-
-See deepseek-harness's [package and install a plugin](https://deepseek-harness.github.io/deepseek-harness/en/develop/basic/publish) tutorial for how bundles and profiles compose, and note the git-install caveat there: a `github:` install only works because this package ships plain `.js` with no build step — there's nothing for a `prepare` script to compile.
-
 ## Configure
 
 Nothing is required — the plugin defaults to the `skills/` directory shipped inside this package. Override only if you want to point at a different copy of these scripts, in your profile's `cordis.patch.yml`:
 
 ```yaml
 - upsert:
-    - id: xray-report-generation
+    - id: medplugin
       config:
         skillsDir: /path/to/other/skills   # optional, default: this package's own skills/
         # pythonBin: python3               # optional, default "python3"
         # timeoutMs: 1800000                # optional, default 30 minutes
 ```
-
-## Is setup automated?
-
-Mostly, yes — but there are real, non-automatable exceptions worth knowing about before you rely on this:
-
-1. **Venv creation is automatic.** Whichever script runs first re-execs itself into one shared venv, pinning dependency versions (`uv venv` + `uv pip install`). You never run a setup script yourself.
-2. **BiomedParse's extra setup is automatic too, but lazy and heavier.** The first call to any `_biomedparse` tool clones its model repo, installs its extra dependencies, and builds `detectron2` from source (~1-2 minutes) — a one-time cost scoped to BiomedParse tools specifically, not paid by the other tools.
-3. **Model weights are automatic** — every script calls HuggingFace's `from_pretrained` (or, for BiomedParse, `hf_hub_download`), which downloads and caches weights on first use. BiomedParse's are ~1.5GB and, unlike MAIRA-2/MedGemma, ungated.
-4. **Gated-model license acceptance is not automatic and cannot be.** MAIRA-2 needs `HF_TOKEN` after a one-time license click; MedGemma likely does too (see [Requirements](#requirements)).
-5. **GPU drivers are a host prerequisite**, same as any other GPU tool.
-
-None of this requires a manual `pip install` or hand-placed checkpoint file — the one-time human steps are `uv`/`git`/a build toolchain being on `PATH` and, for MAIRA-2/MedGemma specifically, accepting each model's Hub license.
 
 ## Scope
 

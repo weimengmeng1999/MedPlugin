@@ -1,18 +1,48 @@
 {
-  "name": "dsh-xray-report-generation",
-  "version": "0.1.0",
+  "name": "dsh-medplugin",
+  "version": "0.2.0",
   "description": "Medical imaging specialist tools for deepseek-harness: MAIRA-2 and MedGemma report generation for chest X-ray/CT/MRI, TotalSegmentator organ segmentation, and BiomedParse text-prompted segmentation across X-ray, CT, MRI, ultrasound, and retinal (fundus) images.",
   "type": "module",
   "main": "index.js",
+  "bin": {
+    "dsh-medplugin": "./lib/doctor-cli.js"
+  },
+  "exports": {
+    ".": "./index.js",
+    "./package.json": "./package.json",
+    "./cordis.patch.yml": "./cordis.patch.yml"
+  },
   "files": [
     "index.js",
     "cordis.patch.yml",
-    "skills"
+    "lib",
+    "skills/_bootstrap.py",
+    "skills/biomedparse/__init__.py",
+    "skills/biomedparse/_core.py",
+    "skills/xray/maira2_report.py",
+    "skills/xray/medgemma_anatomy_localization.py",
+    "skills/xray/medgemma_longitudinal.py",
+    "skills/xray/medgemma_report.py",
+    "skills/xray/biomedparse_segmentation.py",
+    "skills/ct/medgemma_report.py",
+    "skills/ct/totalseg_segmentation.py",
+    "skills/ct/biomedparse_segmentation.py",
+    "skills/mri/totalseg_segmentation.py",
+    "skills/mri/biomedparse_segmentation.py",
+    "skills/ultrasound/biomedparse_segmentation.py",
+    "skills/retinal/biomedparse_segmentation.py"
   ],
   "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/weimengmeng1999/MedPlugin.git"
+  },
+  "homepage": "https://github.com/weimengmeng1999/MedPlugin",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test tests/**/*.test.js"
   },
   "keywords": [
     "deepseek-harness",
