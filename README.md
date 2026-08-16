@@ -93,7 +93,7 @@ The shared-venv stage only happens once total, regardless of which tool triggers
 
 ### 3. Usage examples
 
-These are real tool calls, not a hypothetical — ask your agent something like the phrasing below and it picks the matching tool itself.
+Ask your agent something like the phrasing below and it picks the matching tool itself.
 
 **Chest X-ray report:**
 > "Generate a radiology report for this chest X-ray: `/path/to/chest_xray.png`"
