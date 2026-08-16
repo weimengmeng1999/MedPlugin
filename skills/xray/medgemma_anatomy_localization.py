@@ -24,53 +24,14 @@ Usage:
   python medgemma_anatomy_localization.py --input chest.png --draw annotated.png
 """
 
-import os
 import subprocess
 import sys
 from pathlib import Path
 
-_SKILL_DIR   = Path(__file__).resolve().parent
-_VENV_DIR    = _SKILL_DIR.parent / ".venv"
-_VENV_PYTHON = _VENV_DIR / "bin" / "python"
-
-
-def _ensure_venv_and_reexec():
-    """Re-exec this script under the skill venv if not already running there."""
-    if sys.executable == str(_VENV_PYTHON):
-        return  # already inside the venv — proceed normally
-
-    if not _VENV_PYTHON.exists():
-        print("[medgemma-loc] Creating isolated venv ...", file=sys.stderr)
-        subprocess.check_call(
-            ["uv", "venv", "--system-site-packages",
-             "--python", sys.executable, str(_VENV_DIR)],
-        )
-
-        # Pin torch to the system version so uv doesn't pull a newer CUDA build
-        # that may be incompatible with the installed driver.
-        import importlib.metadata
-        try:
-            torch_pin = f"torch=={importlib.metadata.version('torch')}"
-        except importlib.metadata.PackageNotFoundError:
-            torch_pin = None
-
-        constraints_file = _SKILL_DIR.parent / ".uv-constraints.txt"
-        constraints_file.write_text(f"{torch_pin}\n" if torch_pin else "")
-
-        subprocess.check_call(
-            ["uv", "pip", "install", "--python", str(_VENV_PYTHON),
-             "--constraint", str(constraints_file),
-             "transformers>=4.50.0,<4.52", "accelerate", "pillow",
-             "protobuf", "sentencepiece", "numpy", "scikit-image",
-             "nibabel", "simpleitk", "TotalSegmentator"],
-        )
-        print("[medgemma-loc] Venv ready.", file=sys.stderr)
-
-    # Replace the current process with the venv-python version of this script.
-    os.execv(str(_VENV_PYTHON), [str(_VENV_PYTHON)] + sys.argv)
-
-
-_ensure_venv_and_reexec()
+_SKILL_DIR = Path(__file__).resolve().parent
+sys.path.insert(0, str(_SKILL_DIR.parent))
+import _bootstrap
+_bootstrap.ensure_venv_and_reexec("medgemma-loc")
 
 import argparse
 import json

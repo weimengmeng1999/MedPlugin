@@ -18,43 +18,10 @@ import tempfile
 from pathlib import Path
 
 _SKILL_DIR = Path(__file__).resolve().parent
-_VENV_DIR = _SKILL_DIR.parent / ".venv"
-_VENV_PYTHON = _VENV_DIR / "bin" / "python"
-
-
-def _ensure_venv_and_reexec():
-    if sys.executable == str(_VENV_PYTHON):
-        return
-
-    if not _VENV_PYTHON.exists():
-        print("[totalseg-mri] Creating venv ...", file=sys.stderr)
-        subprocess.check_call(
-            ["uv", "venv", "--system-site-packages",
-             "--python", sys.executable, str(_VENV_DIR)],
-        )
-
-        import importlib.metadata
-        try:
-            torch_pin = f"torch=={importlib.metadata.version('torch')}"
-        except importlib.metadata.PackageNotFoundError:
-            torch_pin = None
-
-        constraints_file = _SKILL_DIR.parent / ".uv-constraints.txt"
-        constraints_file.write_text(f"{torch_pin}\n" if torch_pin else "")
-
-        subprocess.check_call(
-            ["uv", "pip", "install", "--python", str(_VENV_PYTHON),
-             "--constraint", str(constraints_file),
-             "transformers>=4.50.0,<4.52", "accelerate", "pillow",
-             "protobuf", "sentencepiece", "numpy", "scikit-image",
-             "nibabel", "simpleitk", "TotalSegmentator"],
-        )
-        print("[totalseg-mri] Venv ready.", file=sys.stderr)
-
-    os.execv(str(_VENV_PYTHON), [str(_VENV_PYTHON)] + sys.argv)
-
-
-_ensure_venv_and_reexec()
+sys.path.insert(0, str(_SKILL_DIR.parent))
+import _bootstrap
+_bootstrap.ensure_venv_and_reexec("totalseg-mri")
+_VENV_DIR = _bootstrap.VENV_DIR
 
 TASK = "total_mr"
 
