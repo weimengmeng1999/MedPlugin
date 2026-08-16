@@ -1,7 +1,7 @@
 {
   "name": "dsh-xray-report-generation",
   "version": "0.1.0",
-  "description": "Chest X-ray and CT specialist tools for deepseek-harness: MAIRA-2 report generation/grounding, MedGemma 1.5 anatomy localization and longitudinal comparison, MedGemma 4B X-ray and CT reports.",
+  "description": "Medical imaging specialist tools for deepseek-harness: MAIRA-2 and MedGemma report generation for chest X-ray/CT/MRI, TotalSegmentator organ segmentation, and BiomedParse text-prompted segmentation across X-ray, CT, MRI, ultrasound, and retinal (fundus) images.",
   "type": "module",
   "main": "index.js",
   "files": [
@@ -20,7 +20,10 @@
     "radiology",
     "chest-x-ray",
     "ct-scan",
-    "medical-imaging"
+    "medical-imaging",
+    "segmentation",
+    "ultrasound",
+    "retinal-imaging"
   ],
   "dsh": {
     "bundle": {

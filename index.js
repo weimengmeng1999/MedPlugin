@@ -34,6 +34,11 @@ const SCRIPTS = {
   ctMedgemma: 'ct/medgemma_report.py',
   ctTotalseg: 'ct/totalseg_segmentation.py',
   mriTotalseg: 'mri/totalseg_segmentation.py',
+  xrayBiomedparse: 'xray/biomedparse_segmentation.py',
+  ultrasoundBiomedparse: 'ultrasound/biomedparse_segmentation.py',
+  retinalBiomedparse: 'retinal/biomedparse_segmentation.py',
+  ctBiomedparse: 'ct/biomedparse_segmentation.py',
+  mriBiomedparse: 'mri/biomedparse_segmentation.py',
 }
 
 /** Bytes of stdout/stderr retained for error diagnostics; older bytes are dropped. */
@@ -145,15 +150,21 @@ function renderResult(value, formatSuccess) {
   return formatSuccess(value)
 }
 
-/** The image content block for `value.preview`, or none if no preview was attached. */
+/** Image content blocks for `value.previews`, or none if no preview was attached. */
 function previewBlocks(value) {
-  return value.preview === undefined ? [] : [{ type: 'image', attachment: value.preview }]
+  return Array.isArray(value.previews) ? value.previews.map(p => ({ type: 'image', attachment: p })) : []
 }
 
-/** Append a note explaining why a generated preview isn't shown, when that's known. */
+/** Append a note explaining why a generated preview isn't shown, or why only some of several were, when that's known. */
 function withPreviewNote(text, value) {
-  if (value.preview !== undefined || value.preview_skipped_reason === undefined) return text
-  return `${text}\n\n(A preview image was generated at ${value.preview_image_path} but not attached here: ${value.preview_skipped_reason}.)`
+  const parts = [text]
+  if (value.previews === undefined && value.preview_skipped_reason !== undefined) {
+    const paths = value.preview_image_path
+      ?? (Array.isArray(value.preview_image_paths) ? value.preview_image_paths.join(', ') : undefined)
+    parts.push(`(A preview image was generated at ${paths} but not attached here: ${value.preview_skipped_reason}.)`)
+  }
+  if (value.preview_note !== undefined) parts.push(`(${value.preview_note})`)
+  return parts.join('\n\n')
 }
 
 function renderReport(value) {
@@ -185,6 +196,30 @@ function renderSegmentation(value) {
   return [{ type: 'text', text: withPreviewNote(text, value) }, ...previewBlocks(value)]
 }
 
+function renderBiomedparse2d(value) {
+  const text = renderResult(value, (v) => {
+    const outputs = Array.isArray(v.outputs) ? v.outputs : []
+    if (outputs.length === 0) return 'No prompts segmented.'
+    return outputs.map(o => `${o.prompt}: ${o.coverage_pct}% of image (score ${o.score})`).join('\n')
+  })
+  return [{ type: 'text', text: withPreviewNote(text, value) }, ...previewBlocks(value)]
+}
+
+function renderBiomedparse3d(value) {
+  const text = renderResult(value, (v) => {
+    const slices = Array.isArray(v.slices) ? v.slices : []
+    const lines = [`${v.n_slices_processed ?? slices.length} of ${v.n_slices_total} slice(s) processed.`]
+    for (const slice of slices) {
+      const prompts = Array.isArray(slice.prompts) ? slice.prompts : []
+      lines.push(`slice ${slice.slice_idx}: ` + prompts.map(p => `${p.prompt} (${(p.coverage * 100).toFixed(1)}%)`).join(', '))
+    }
+    const masks = v.nifti_masks !== undefined && typeof v.nifti_masks === 'object' ? Object.entries(v.nifti_masks) : []
+    if (masks.length > 0) lines.push('3D NIfTI masks: ' + masks.map(([prompt, path]) => `${prompt} -> ${path}`).join(', '))
+    return lines.join('\n')
+  })
+  return [{ type: 'text', text: withPreviewNote(text, value) }, ...previewBlocks(value)]
+}
+
 /**
  * Soft-check whether the currently routed model declares image input.
  * Never throws: an unresolved provider/model/llm service is treated as not
@@ -210,20 +245,29 @@ async function loadPreviewAttachment(attachments, path) {
   return attachments.saveImage({ data, mediaType: 'image/png', name: 'preview.png' })
 }
 
+/** Cap on how many preview images one tool call attaches — BiomedParse can generate one overlay per prompt (or per prompt per slice in --all_slices mode), far more than useful to show inline. */
+const MAX_ATTACHED_PREVIEWS = 4
+
 /**
- * If `value.preview_image_path` names a file this process wrote and the
- * current route can carry an image, commit it through the attachment
- * service and attach the resulting reference as `value.preview`.
- * Best-effort: an unreadable temp file or a rejected save leaves `value`
- * unchanged rather than failing a tool call whose primary result already
- * succeeded. A known reason for skipping (no attachment service, or a
+ * If `value.preview_image_path` (single) or `value.preview_image_paths`
+ * (array) names file(s) this process wrote and the current route can carry
+ * an image, commit up to MAX_ATTACHED_PREVIEWS of them through the
+ * attachment service and attach the resulting references as
+ * `value.previews`. Best-effort: an unreadable temp file or a rejected save
+ * is dropped rather than failing a tool call whose primary result already
+ * succeeded. A known reason for attaching none (no attachment service, or a
  * route that declared it can't carry images — e.g. DeepSeek's own
  * chat-completions models, which are text-only at the wire level) is
- * recorded as `value.preview_skipped_reason` so the tool's rendered text
- * can say why, instead of the image just silently not appearing.
+ * recorded as `value.preview_skipped_reason`; attaching fewer than were
+ * generated is recorded as `value.preview_note` — so the tool's rendered
+ * text can say why, instead of images just silently not appearing.
  */
 async function attachPreview(ctx, exec, value) {
-  if (value.status !== 'success' || typeof value.preview_image_path !== 'string') return value
+  const paths = typeof value.preview_image_path === 'string'
+    ? [value.preview_image_path]
+    : Array.isArray(value.preview_image_paths) ? value.preview_image_paths : undefined
+  if (value.status !== 'success' || paths === undefined || paths.length === 0) return value
+
   const attachments = ctx.get('attachments')
   if (attachments === undefined) {
     value.preview_skipped_reason = 'no attachment service is mounted in this profile'
@@ -233,11 +277,20 @@ async function attachPreview(ctx, exec, value) {
     value.preview_skipped_reason = 'the current model route does not declare image input'
     return value
   }
-  const ref = await loadPreviewAttachment(attachments, value.preview_image_path).catch(() => undefined)
-  if (ref !== undefined) {
-    value.preview = { attachmentId: ref.attachmentId, mediaType: ref.mediaType, bytes: ref.bytes, width: ref.width, height: ref.height }
-  } else {
-    value.preview_skipped_reason = 'the preview file could not be read or committed'
+
+  const candidates = paths.slice(0, MAX_ATTACHED_PREVIEWS)
+  const refs = []
+  for (const path of candidates) {
+    const ref = await loadPreviewAttachment(attachments, path).catch(() => undefined)
+    if (ref !== undefined) refs.push({ attachmentId: ref.attachmentId, mediaType: ref.mediaType, bytes: ref.bytes, width: ref.width, height: ref.height })
+  }
+  if (refs.length === 0) {
+    value.preview_skipped_reason = 'the preview file(s) could not be read or committed'
+    return value
+  }
+  value.previews = refs
+  if (paths.length > refs.length) {
+    value.preview_note = `Showing ${refs.length} of ${paths.length} generated preview images.`
   }
   return value
 }
@@ -448,6 +501,109 @@ export function apply(ctx, config = {}) {
     isConcurrencySafe: () => false,
     async execute(args, exec) {
       const value = await run(SCRIPTS.mriTotalseg, segmentationCliArgs(args), exec.signal)
+      return attachPreview(ctx, exec, value)
+    },
+  }))
+
+  const BIOMEDPARSE_SETUP_NOTE = 'The first BiomedParse call on this machine clones the model repo, installs ~15 extra Python packages plus a from-source detectron2 build (one-time, ~1-2 minutes), and downloads ~1.5GB of ungated weights (no token needed) — later calls skip straight to inference.'
+
+  const biomedparse2dParams = {
+    input: { type: 'string', required: true, description: 'Absolute path to the image (PNG, JPG, or DICOM .dcm).' },
+    prompts: { type: 'array', items: { type: 'string' }, required: true, description: 'Findings or structures to segment, e.g. ["consolidation", "pleural effusion"]. One overlay is generated per prompt.' },
+    output_dir: { type: 'string', description: 'Directory to write overlay/mask images into (optional — defaults to a fresh temp directory).' },
+    gpu: { type: 'integer', description: 'GPU index (-1 for CPU). Default 0.' },
+  }
+
+  const biomedparse2dCliArgs = args => {
+    const cliArgs = ['--input', args.input, '--prompts', args.prompts.join(','), '--gpu', String(args.gpu ?? 0)]
+    if (args.output_dir !== undefined) cliArgs.push('--output_dir', args.output_dir)
+    return cliArgs
+  }
+
+  ctx.tools.register(defineTool({
+    name: 'xray_segmentation_biomedparse',
+    description: `Text-prompted segmentation of findings/structures in a chest X-ray with BiomedParse. ${BIOMEDPARSE_SETUP_NOTE}`,
+    parameters: biomedparse2dParams,
+    output: { schema: outputSchema('success'), render: (_args, value) => renderBiomedparse2d(value) },
+    isConcurrencySafe: () => false,
+    async execute(args, exec) {
+      const value = await run(SCRIPTS.xrayBiomedparse, biomedparse2dCliArgs(args), exec.signal)
+      return attachPreview(ctx, exec, value)
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'ultrasound_segmentation_biomedparse',
+    description: `Text-prompted segmentation of findings/structures in an ultrasound image with BiomedParse. ${BIOMEDPARSE_SETUP_NOTE}`,
+    parameters: biomedparse2dParams,
+    output: { schema: outputSchema('success'), render: (_args, value) => renderBiomedparse2d(value) },
+    isConcurrencySafe: () => false,
+    async execute(args, exec) {
+      const value = await run(SCRIPTS.ultrasoundBiomedparse, biomedparse2dCliArgs(args), exec.signal)
+      return attachPreview(ctx, exec, value)
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'retinal_segmentation_biomedparse',
+    description: `Text-prompted segmentation of findings/structures in a retinal (fundus) image with BiomedParse. ${BIOMEDPARSE_SETUP_NOTE}`,
+    parameters: biomedparse2dParams,
+    output: { schema: outputSchema('success'), render: (_args, value) => renderBiomedparse2d(value) },
+    isConcurrencySafe: () => false,
+    async execute(args, exec) {
+      const value = await run(SCRIPTS.retinalBiomedparse, biomedparse2dCliArgs(args), exec.signal)
+      return attachPreview(ctx, exec, value)
+    },
+  }))
+
+  const biomedparse3dParams = {
+    input: { type: 'string', required: true, description: 'Absolute path to a NIfTI volume (.nii/.nii.gz) or a directory containing one DICOM series.' },
+    prompts: { type: 'array', items: { type: 'string' }, required: true, description: 'Findings or structures to segment, e.g. ["liver", "kidney"].' },
+    slice_idx: { type: 'integer', description: 'Slice index along the depth axis (optional — defaults to the middle slice).' },
+    all_slices: { type: 'boolean', description: 'Process every slice and reconstruct a 3D NIfTI mask per prompt, instead of just one slice. One model call per prompt per slice — slow and produces one overlay PNG per prompt per slice; only set this when a full-volume mask is actually needed.' },
+    threshold: { type: 'number', description: 'Mask binarization threshold. Default 0.5.' },
+    output_dir: { type: 'string', description: 'Directory to write overlay/mask images into (optional — defaults to a fresh temp directory).' },
+    gpu: { type: 'integer', description: 'GPU index (-1 for CPU). Default 0.' },
+  }
+
+  const biomedparse3dCliArgs = args => {
+    const cliArgs = ['--input', args.input, '--prompts', args.prompts.join(','), '--gpu', String(args.gpu ?? 0)]
+    if (args.slice_idx !== undefined) cliArgs.push('--slice_idx', String(args.slice_idx))
+    if (args.all_slices) cliArgs.push('--all_slices')
+    if (args.threshold !== undefined) cliArgs.push('--threshold', String(args.threshold))
+    if (args.output_dir !== undefined) cliArgs.push('--output_dir', args.output_dir)
+    return cliArgs
+  }
+
+  ctx.tools.register(defineTool({
+    name: 'ct_segmentation_biomedparse',
+    description: `Text-prompted segmentation of findings/structures in a CT volume with BiomedParse — complementary to ct_segmentation_totalseg's fixed anatomical-structure list, since BiomedParse takes any free-text prompt (pathology or anatomy). ${BIOMEDPARSE_SETUP_NOTE}`,
+    parameters: {
+      ...biomedparse3dParams,
+      site: { type: 'string', required: true, enum: ['abdomen', 'lung', 'pelvis', 'liver', 'colon', 'pancreas'], description: 'Anatomical site, used for CT-specific windowing.' },
+    },
+    output: { schema: outputSchema('success'), render: (_args, value) => renderBiomedparse3d(value) },
+    isConcurrencySafe: () => false,
+    async execute(args, exec) {
+      const cliArgs = [...biomedparse3dCliArgs(args), '--site', args.site]
+      const value = await run(SCRIPTS.ctBiomedparse, cliArgs, exec.signal)
+      return attachPreview(ctx, exec, value)
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'mri_segmentation_biomedparse',
+    description: `Text-prompted segmentation of findings/structures in an MRI volume with BiomedParse — complementary to mri_segmentation_totalseg's fixed anatomical-structure list, since BiomedParse takes any free-text prompt (pathology or anatomy). ${BIOMEDPARSE_SETUP_NOTE}`,
+    parameters: {
+      ...biomedparse3dParams,
+      channel_idx: { type: 'integer', description: 'Channel index for a multi-channel MRI volume (e.g. BRATS-style, 0-3). Optional.' },
+    },
+    output: { schema: outputSchema('success'), render: (_args, value) => renderBiomedparse3d(value) },
+    isConcurrencySafe: () => false,
+    async execute(args, exec) {
+      const cliArgs = [...biomedparse3dCliArgs(args)]
+      if (args.channel_idx !== undefined) cliArgs.push('--channel_idx', String(args.channel_idx))
+      const value = await run(SCRIPTS.mriBiomedparse, cliArgs, exec.signal)
       return attachPreview(ctx, exec, value)
     },
   }))
