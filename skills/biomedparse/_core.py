@@ -313,7 +313,10 @@ def run_2d(input_path, prompts, output_dir, gpu, tag, modality):
         "prompts": prompts,
         "device": device,
         "outputs": outputs,
-        "preview_image_paths": [o["overlay"] for o in outputs],
+        # Attach both the overlay composite (original | segmented) and the
+        # binary mask per prompt — index.js shows up to MAX_ATTACHED_PREVIEWS
+        # (4) of these as images in the conversation.
+        "preview_image_paths": [p for o in outputs for p in (o["overlay"], o["mask"])],
         "elapsed_s": elapsed,
     }
 

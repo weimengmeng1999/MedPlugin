@@ -1,7 +1,7 @@
 {
   "name": "dsh-medplugin",
   "version": "0.2.0",
-  "description": "Medical imaging specialist tools for deepseek-harness: MAIRA-2 and MedGemma report generation for chest X-ray/CT/MRI, TotalSegmentator organ segmentation, and BiomedParse text-prompted segmentation across X-ray, CT, MRI, ultrasound, and retinal (fundus) images.",
+  "description": "Medical imaging specialist tools for deepseek-harness: MAIRA-2 and MedGemma report generation for chest X-ray/CT/MRI/retinal (fundus) images, TotalSegmentator organ segmentation, BiomedCLIP zero-shot ultrasound classification, and BiomedParse text-prompted segmentation across X-ray, CT, MRI, ultrasound, and retinal (fundus) images.",
   "type": "module",
   "main": "index.js",
   "bin": {
@@ -24,13 +24,18 @@
     "skills/xray/medgemma_longitudinal.py",
     "skills/xray/medgemma_report.py",
     "skills/xray/biomedparse_segmentation.py",
+    "skills/medgemma_3d/__init__.py",
+    "skills/medgemma_3d/_core.py",
     "skills/ct/medgemma_report.py",
     "skills/ct/totalseg_segmentation.py",
     "skills/ct/biomedparse_segmentation.py",
+    "skills/mri/medgemma_report.py",
     "skills/mri/totalseg_segmentation.py",
     "skills/mri/biomedparse_segmentation.py",
     "skills/ultrasound/biomedparse_segmentation.py",
-    "skills/retinal/biomedparse_segmentation.py"
+    "skills/ultrasound/biomedclip_classify.py",
+    "skills/retinal/biomedparse_segmentation.py",
+    "skills/retinal/medgemma_report.py"
   ],
   "license": "MIT",
   "repository": {
@@ -61,6 +66,7 @@
     }
   },
   "peerDependencies": {
+    "@deepseek-ai/dsh-llm": ">=0.1.0-rc.6",
     "@deepseek-ai/dsh-tools": ">=0.1.0-rc.5"
   },
   "devDependencies": {

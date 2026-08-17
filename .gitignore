@@ -13,3 +13,6 @@ skills/**/__pycache__/
 # skills/biomedparse/_core.py on first use, same as skills/.venv/ above.
 skills/biomedparse/BiomedParse/
 skills/biomedparse/weights/
+
+# Segmentation previews written into the session workspace by skills output.
+medplugin/previews/

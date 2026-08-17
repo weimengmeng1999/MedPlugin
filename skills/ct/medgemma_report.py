@@ -2,11 +2,21 @@
 """
 Meng Wei
 
-CT report-generation candidate with MedGemma.
+CT report-generation candidate with MedGemma 1.5 4B.
 
-MedGemma is a 2-D image-text-to-text model, so this script converts a CT volume
-into a fixed axial-slice montage. Treat this as a complementary candidate for a
-selector, not as a replacement for Merlin's native 3-D CT model.
+MedGemma 1.5 4B interprets a 3D CT volume as a sequence of per-slice image
+blocks, each windowed into a 3-channel RGB encoding: R = wide window (-1024
+to 1024 HU), G = soft-tissue window (-135 to 215 HU), B = brain window (0 to
+80 HU). This is the technique documented in Google's own reference notebook
+(Google-Health/medgemma, notebooks/high_dimensional_ct_hugging_face.ipynb).
+Shared per-slice-sequence plumbing lives in skills/medgemma_3d/_core.py; this
+file only supplies the CT-specific windowing and prompt text.
+
+Treat this as a complementary candidate for a selector, not as a replacement
+for a native 3D CT model.
+
+Usage:
+  python medgemma_report.py --input ct_volume.nii.gz
 """
 
 import sys
@@ -22,148 +32,74 @@ import json
 import tempfile
 import time
 
-import numpy as np
-from PIL import Image, ImageDraw
+from medgemma_3d import _core
+
+# Per Google's reference notebook: wide, soft-tissue, and brain HU windows,
+# stacked as the R/G/B channels of one image per slice.
+_WINDOW_CLIPS = [(-1024, 1024), (-135, 215), (0, 80)]
+
+_INTRO = (
+    "You are reviewing a contiguous sequence of axial CT slices, sampled "
+    "uniformly through the volume and shown in order from superior to "
+    "inferior. Each slice is a three-channel image combining a wide window, "
+    "a soft-tissue window, and a brain window."
+)
 
 
-SYSTEM_PROMPT = "You are an expert radiologist."
+def _norm(slice_2d, low, high):
+    import numpy as np
+
+    clipped = np.clip(slice_2d, low, high).astype("float32")
+    return (clipped - low) / (high - low) * 255.0
 
 
-def dicom_to_nifti(dicom_dir: Path) -> str:
-    import SimpleITK as sitk
+def window_slice_rgb(slice_2d):
+    """One CT slice -> 3-channel uint8 RGB, per _WINDOW_CLIPS."""
+    import numpy as np
 
-    reader = sitk.ImageSeriesReader()
-    names = reader.GetGDCMSeriesFileNames(str(dicom_dir))
-    if not names:
-        raise ValueError(f"No DICOM series found in {dicom_dir}")
-    reader.SetFileNames(names)
-    image = reader.Execute()
-    tmp_dir = tempfile.mkdtemp(prefix="medgemma_ct_dicom_")
-    out = str(Path(tmp_dir) / "ct_volume.nii.gz")
-    sitk.WriteImage(image, out)
-    return out
+    channels = [_norm(slice_2d, lo, hi) for lo, hi in _WINDOW_CLIPS]
+    return np.round(np.stack(channels, axis=-1)).astype("uint8")
 
 
-def resolve_nifti(path_text: str) -> str:
-    path = Path(path_text).expanduser().resolve()
-    if path.is_file() and (path.name.endswith(".nii") or path.name.endswith(".nii.gz")):
-        return str(path)
-    if path.is_dir():
-        return dicom_to_nifti(path)
-    raise ValueError("Input must be a .nii/.nii.gz file or a DICOM series directory")
-
-
-def window_slice(slice_2d: np.ndarray, center: float = 40.0, width: float = 400.0) -> np.ndarray:
-    low = center - width / 2.0
-    high = center + width / 2.0
-    clipped = np.clip(slice_2d, low, high)
-    return ((clipped - low) / (high - low) * 255.0).astype(np.uint8)
-
-
-def make_axial_montage(nifti_path: str, n_slices: int = 16, tile_size: int = 224) -> Image.Image:
-    import nibabel as nib
-
-    img = nib.load(nifti_path)
-    volume = np.asanyarray(img.dataobj)
-    volume = np.squeeze(volume)
-    if volume.ndim != 3:
-        raise ValueError(f"Expected 3-D CT volume, got shape {volume.shape}")
-
-    z_count = volume.shape[2]
-    start = max(0, int(z_count * 0.08))
-    stop = min(z_count - 1, int(z_count * 0.92))
-    indices = np.linspace(start, stop, n_slices).astype(int)
-
-    tiles = []
-    for idx in indices:
-        arr = window_slice(volume[:, :, idx])
-        tile = Image.fromarray(np.rot90(arr)).convert("RGB")
-        tile = tile.resize((tile_size, tile_size), Image.BILINEAR)
-        draw = ImageDraw.Draw(tile)
-        draw.rectangle((0, 0, 58, 18), fill=(0, 0, 0))
-        draw.text((4, 3), f"z={idx}", fill=(255, 255, 255))
-        tiles.append(tile)
-
-    cols = int(np.ceil(np.sqrt(n_slices)))
-    rows = int(np.ceil(n_slices / cols))
-    montage = Image.new("RGB", (cols * tile_size, rows * tile_size), (0, 0, 0))
-    for i, tile in enumerate(tiles):
-        x = (i % cols) * tile_size
-        y = (i // cols) * tile_size
-        montage.paste(tile, (x, y))
-    return montage
-
-
-def load_pipeline(gpu: int, model_id: str):
-    import torch
-    from transformers import pipeline
-
-    device_map = f"cuda:{gpu}" if gpu >= 0 else "cpu"
-    print(f"[medgemma-ct] Loading {model_id} on {device_map}", file=sys.stderr)
-    return pipeline(
-        "image-text-to-text",
-        model=model_id,
-        torch_dtype=torch.bfloat16,
-        device_map=device_map,
-    )
-
-
-def run_report(pipe, image: Image.Image, indication: str | None, max_new_tokens: int) -> str:
-    prompt = (
-        "Generate the findings section of an abdominal CT radiology report from "
-        "this axial CT slice montage. Be concise, organize by organ system, and "
-        "avoid findings that are not visible."
+def build_query(indication):
+    query = (
+        "Based on the slices above, generate the findings section of a CT "
+        "radiology report. Be concise, organize by organ system, and avoid "
+        "findings that are not visible in the provided slices."
     )
     if indication:
-        prompt += f" Clinical indication: {indication}"
-
-    messages = [
-        {"role": "system", "content": [{"type": "text", "text": SYSTEM_PROMPT}]},
-        {
-            "role": "user",
-            "content": [
-                {"type": "image", "image": image},
-                {"type": "text", "text": prompt},
-            ],
-        },
-    ]
-    output = pipe(text=messages, max_new_tokens=max_new_tokens, do_sample=False)
-    content = output[0]["generated_text"][-1]["content"]
-    if isinstance(content, list):
-        response = "".join(block.get("text", "") for block in content if isinstance(block, dict))
-    else:
-        response = str(content)
-    if "<unused95>" in response:
-        response = response.split("<unused95>", 1)[1].lstrip()
-    return response.strip()
+        query += f" Clinical indication: {indication}"
+    return query
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="MedGemma CT montage report candidate")
+    parser = argparse.ArgumentParser(description="MedGemma 1.5 CT per-slice-sequence report candidate")
     parser.add_argument("--input", "-i", required=True)
     parser.add_argument("--output", "-o", default=None)
     parser.add_argument("--study_id", default=None)
     parser.add_argument("--indication", default=None)
-    parser.add_argument("--model", default="google/medgemma-4b-it")
+    parser.add_argument("--model", default="google/medgemma-1.5-4b-it")
     parser.add_argument("--gpu", "-g", type=int, default=0)
-    parser.add_argument("--n_slices", type=int, default=16)
-    parser.add_argument("--max_new_tokens", type=int, default=512)
+    parser.add_argument("--n_slices", type=int, default=32,
+                        help="Slices uniformly sampled through the volume and sent to the model, one per SLICE block (default 32; Google's own notebook demo uses up to 85 — more slices costs more inference time per call, proportional to n_slices additional images through the vision encoder).")
+    parser.add_argument("--max_new_tokens", type=int, default=1024)
     parser.add_argument("--montage_output", default=None,
-                        help="Path to save the axial-slice montage PNG (optional, default: a temp file)")
+                        help="Path to save the contact-sheet preview PNG (optional, default: a temp file). Display only — not what the model sees; the model sees each slice as a separate full-resolution image.")
     args = parser.parse_args()
 
     t0 = time.time()
     try:
-        nifti_path = resolve_nifti(args.input)
-        montage = make_axial_montage(nifti_path, args.n_slices)
+        nifti_path = _core.resolve_nifti(args.input)
+        rgb_slices, indices = _core.sample_slices(nifti_path, args.n_slices, window_slice_rgb)
+        contact_sheet = _core.make_contact_sheet(rgb_slices, indices)
         montage_path = (
             Path(args.montage_output) if args.montage_output
             else Path(tempfile.mkdtemp(prefix="medgemma_ct_montage_")) / "preview.png"
         )
         montage_path.parent.mkdir(parents=True, exist_ok=True)
-        montage.save(str(montage_path))
-        pipe = load_pipeline(args.gpu, args.model)
-        report_text = run_report(pipe, montage, args.indication, args.max_new_tokens)
+        contact_sheet.save(str(montage_path))
+        pipe = _core.load_pipeline("medgemma-ct", args.gpu, args.model)
+        report_text = _core.run_report(pipe, rgb_slices, _INTRO, build_query(args.indication), args.max_new_tokens)
     except Exception as exc:
         print(json.dumps({"status": "error", "error": str(exc)}))
         sys.exit(1)
@@ -172,9 +108,11 @@ def main() -> None:
         "status": "success",
         "study_id": args.study_id,
         "model": args.model,
-        "mode": "ct_montage_report",
+        "mode": "ct_per_slice_sequence_report",
         "image_path": args.input,
         "resolved_nifti_path": nifti_path,
+        "n_slices_sent": len(rgb_slices),
+        "slice_indices": indices,
         "report_text": report_text,
         "preview_image_path": str(montage_path),
         "elapsed_seconds": round(time.time() - t0, 2),

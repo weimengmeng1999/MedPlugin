@@ -1,10 +1,14 @@
 import { fileURLToPath } from 'node:url'
 import { spawn } from 'node:child_process'
-import { readFile } from 'node:fs/promises'
+import { readFile, mkdir, copyFile } from 'node:fs/promises'
+import { basename, join } from 'node:path'
 import { defineTool } from '@deepseek-ai/dsh-tools'
+import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import { resolveImageInput } from './lib/attachment-input.js'
+import { applyVisionRoutes } from './lib/vision-route.js'
 
 export const name = 'medplugin'
-export const inject = ['tools']
+export const inject = ['tools', 'llm']
 
 /**
  * @typedef {object} Config
@@ -18,6 +22,14 @@ export const inject = ['tools']
  * @property {number} [timeoutMs] Kill the model process if it hasn't
  *   finished after this many ms (model load + GPU inference can be slow).
  *   Default 30 minutes.
+ * @property {boolean} [wrapProviders] Register an image-capable twin route
+ *   per live text provider ("<provider>-medplugin", e.g.
+ *   "deepseek-official-medplugin") so pasted images are admitted on text-only
+ *   routes and reach the model as attachment-id markers — select the twin in
+ *   the model picker. Default true.
+ * @property {string[]} [excludedProviders] Provider ids never to wrap
+ *   (optional; routes ending in "-medplugin" or "-vision" are always
+ *   excluded automatically).
  */
 
 const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000
@@ -33,16 +45,27 @@ const SCRIPTS = {
   xrayMedgemma: 'xray/medgemma_report.py',
   ctMedgemma: 'ct/medgemma_report.py',
   ctTotalseg: 'ct/totalseg_segmentation.py',
+  mriMedgemma: 'mri/medgemma_report.py',
   mriTotalseg: 'mri/totalseg_segmentation.py',
   xrayBiomedparse: 'xray/biomedparse_segmentation.py',
   ultrasoundBiomedparse: 'ultrasound/biomedparse_segmentation.py',
+  ultrasoundBiomedclip: 'ultrasound/biomedclip_classify.py',
   retinalBiomedparse: 'retinal/biomedparse_segmentation.py',
+  retinalMedgemma: 'retinal/medgemma_report.py',
   ctBiomedparse: 'ct/biomedparse_segmentation.py',
   mriBiomedparse: 'mri/biomedparse_segmentation.py',
 }
 
 /** Bytes of stdout/stderr retained for error diagnostics; older bytes are dropped. */
 const MAX_CAPTURE_BYTES = 200_000
+
+/**
+ * Shared tail for image-input parameter descriptions: the argument may be a
+ * filesystem path OR the durable attachment id (e.g. "sha256:...") of an
+ * image pasted into the conversation — the same "path or pasted image"
+ * contract the dsh-vision-router pixel tools use.
+ */
+const IMAGE_INPUT_NOTE = ' May also be the attachment id (e.g. "sha256:...") of an image pasted in this conversation instead of a path.'
 
 function appendCapped(buf, chunk) {
   const next = buf + chunk.toString('utf8')
@@ -155,20 +178,49 @@ function previewBlocks(value) {
   return Array.isArray(value.previews) ? value.previews.map(p => ({ type: 'image', attachment: p })) : []
 }
 
-/** Append a note explaining why a generated preview isn't shown, or why only some of several were, when that's known. */
+/**
+ * Append a note explaining how to see generated previews. When the previews
+ * were attached inline (`value.previews` non-empty) the chat already shows
+ * them as clickable image thumbnails, so we just point the user at that
+ * (click a preview to enlarge it) instead of redundantly dumping the plain
+ * file paths. When no preview could be attached inline (e.g. the route is
+ * text-only) we list the workspace paths as the fallback way to open them,
+ * and explain why images aren't shown inline.
+ */
 function withPreviewNote(text, value) {
   const parts = [text]
-  if (value.previews === undefined && value.preview_skipped_reason !== undefined) {
+  const postedInline = Array.isArray(value.previews) && value.previews.length > 0
+  if (!postedInline && value.preview_skipped_reason !== undefined) {
     const paths = value.preview_image_path
       ?? (Array.isArray(value.preview_image_paths) ? value.preview_image_paths.join(', ') : undefined)
     parts.push(`(A preview image was generated at ${paths} but not attached here: ${value.preview_skipped_reason}.)`)
   }
   if (value.preview_note !== undefined) parts.push(`(${value.preview_note})`)
+  if (postedInline) {
+    parts.push('Click a preview image to enlarge it.')
+  } else if (Array.isArray(value.preview_file_links) && value.preview_file_links.length > 0) {
+    parts.push('Open the preview image(s):\n' + value.preview_file_links.map(p => `- ${p}`).join('\n'))
+  }
   return parts.join('\n\n')
 }
 
 function renderReport(value) {
-  const text = renderResult(value, v => (typeof v.report_text === 'string' ? v.report_text : '(no report_text in output)'))
+  const text = renderResult(value, (v) => {
+    const report = typeof v.report_text === 'string' ? v.report_text : '(no report_text in output)'
+    return typeof v.preprocessing_note === 'string' ? `${report}\n\n(${v.preprocessing_note})` : report
+  })
+  return [{ type: 'text', text: withPreviewNote(text, value) }, ...previewBlocks(value)]
+}
+
+function renderClassification(value) {
+  const text = renderResult(value, (v) => {
+    if (typeof v.prediction !== 'string') return '(no prediction in output)'
+    const probs = v.probabilities && typeof v.probabilities === 'object' ? v.probabilities : {}
+    const ranked = Object.entries(probs).sort((a, b) => b[1] - a[1])
+    const lines = [`Prediction: ${v.prediction} (confidence ${v.confidence})`]
+    if (ranked.length > 0) lines.push(ranked.map(([label, p]) => `${label}: ${p}`).join(', '))
+    return lines.join('\n')
+  })
   return [{ type: 'text', text: withPreviewNote(text, value) }, ...previewBlocks(value)]
 }
 
@@ -254,6 +306,31 @@ async function loadPreviewAttachment(attachments, path) {
   return attachments.saveImage({ data, mediaType: 'image/png', name: 'preview.png' })
 }
 
+/**
+ * Copy the generated preview PNGs into a `previews/` folder in the session's
+ * workspace and return their absolute paths, so the tool's text output can
+ * name a clickable file. This mirrors how dsh-vision-router surfaces its
+ * artifacts (a path string the user can open) — the web UI cannot render
+ * plugin-supplied images inline on a text-only route, so a real file path is
+ * the dependable way to actually see the overlay.
+ * @returns {{ dir: string, links: string[] }} or null when the workspace is
+ *   unavailable or no preview files exist.
+ */
+async function savePreviewsToWorkspace(exec, paths) {
+  const session = exec && exec.agent && exec.agent.session
+  const cwd = session && session.header && session.header.cwd
+  if (typeof cwd !== 'string' || cwd === '') return null
+  const outDir = join(cwd, 'medplugin', 'previews')
+  await mkdir(outDir, { recursive: true })
+  const links = []
+  for (const p of paths) {
+    const target = join(outDir, basename(p))
+    await copyFile(p, target).catch(() => {})
+    links.push(target)
+  }
+  return { dir: outDir, links: links.filter(() => true) }
+}
+
 /** Cap on how many preview images one tool call attaches — BiomedParse can generate one overlay per prompt (or per prompt per slice in --all_slices mode), far more than useful to show inline. */
 const MAX_ATTACHED_PREVIEWS = 4
 
@@ -277,13 +354,20 @@ async function attachPreview(ctx, exec, value) {
     : Array.isArray(value.preview_image_paths) ? value.preview_image_paths : undefined
   if (value.status !== 'success' || paths === undefined || paths.length === 0) return value
 
+  // The dependable way to actually see the overlay: copy the previews into the
+  // session workspace and expose their paths, so the tool's text output can
+  // name a clickable file — regardless of route modality. The web UI cannot
+  // render plugin-supplied images inline on a text-only route.
+  const saved = await savePreviewsToWorkspace(exec, paths).catch(() => null)
+  if (saved !== null && saved.links.length > 0) value.preview_file_links = saved.links
+
   const attachments = ctx.get('attachments')
   if (attachments === undefined) {
-    value.preview_skipped_reason = 'no attachment service is mounted in this profile'
+    value.preview_skipped_reason = value.preview_file_links ? undefined : 'no attachment service is mounted in this profile'
     return value
   }
   if (!(await isImageCapableRoute(ctx, exec))) {
-    value.preview_skipped_reason = 'the current model route does not declare image input'
+    value.preview_skipped_reason = value.preview_file_links ? undefined : 'the current model route does not declare image input'
     return value
   }
 
@@ -300,6 +384,24 @@ async function attachPreview(ctx, exec, value) {
   value.previews = refs
   if (paths.length > refs.length) {
     value.preview_note = `Showing ${refs.length} of ${paths.length} generated preview images.`
+  }
+  // Tool-result image blocks are not rendered by the web UI (they are
+  // flattened to JSON in the tool card), so post the previews as a synthetic
+  // user message — the same mechanism the harness's own read_image uses — and
+  // they appear in the chat like a pasted image. Best-effort: the tool result
+  // still carries them.
+  if (typeof exec.deferContext === 'function') {
+    try {
+      exec.deferContext(createUserMessage({
+        content: [
+          { type: 'text', text: 'MedPlugin preview image(s) — click a preview to enlarge it (segmentation overlay/mask generated by this tool call, informational, not a user upload).' },
+          ...refs.map(ref => ({ type: 'image', attachment: ref })),
+        ],
+        source: { kind: 'plugin', plugin: 'medplugin' },
+      }))
+    } catch {
+      // best-effort: the tool result already carries the previews
+    }
   }
   return value
 }
@@ -323,9 +425,9 @@ export function apply(ctx, config = {}) {
     name: 'xray_report_maira',
     description: 'Generate a chest X-ray radiology report with MAIRA-2. Supports plain report, grounded report (findings with bounding boxes), or locating a single phrase on the image. Loads a multi-GB model onto a GPU, so a single call can take minutes; the first call also downloads ~14GB of gated weights (requires HF_TOKEN).',
     parameters: {
-      input: { type: 'string', required: true, description: 'Absolute path to the frontal chest X-ray (PNG, JPG, or DICOM .dcm).' },
-      lateral: { type: 'string', description: 'Absolute path to a lateral view from the same study (optional but recommended).' },
-      prior: { type: 'string', description: 'Absolute path to a prior frontal X-ray (optional).' },
+      input: { type: 'string', required: true, description: 'Absolute path to the frontal chest X-ray (PNG, JPG, or DICOM .dcm).' + IMAGE_INPUT_NOTE },
+      lateral: { type: 'string', description: 'Absolute path to a lateral view from the same study (optional but recommended).' + IMAGE_INPUT_NOTE },
+      prior: { type: 'string', description: 'Absolute path to a prior frontal X-ray (optional).' + IMAGE_INPUT_NOTE },
       prior_report: { type: 'string', description: 'Prior radiology report text (optional, used with prior).' },
       indication: { type: 'string', description: 'Clinical indication, e.g. "Dyspnea."' },
       technique: { type: 'string', description: 'Technique, e.g. "PA and lateral views."' },
@@ -348,9 +450,10 @@ export function apply(ctx, config = {}) {
       if (mode === 'phrase_grounding' && args.phrase === undefined) {
         throw new Error('phrase is required when mode is "phrase_grounding"')
       }
-      const cliArgs = ['--input', args.input]
-      if (args.lateral !== undefined) cliArgs.push('--lateral', args.lateral)
-      if (args.prior !== undefined) cliArgs.push('--prior', args.prior)
+      const input = await resolveImageInput(ctx, exec, args.input)
+      const cliArgs = ['--input', input]
+      if (args.lateral !== undefined) cliArgs.push('--lateral', await resolveImageInput(ctx, exec, args.lateral))
+      if (args.prior !== undefined) cliArgs.push('--prior', await resolveImageInput(ctx, exec, args.prior))
       if (args.prior_report !== undefined) cliArgs.push('--prior_report', args.prior_report)
       if (args.indication !== undefined) cliArgs.push('--indication', args.indication)
       if (args.technique !== undefined) cliArgs.push('--technique', args.technique)
@@ -367,7 +470,7 @@ export function apply(ctx, config = {}) {
     name: 'xray_anatomy_localization',
     description: 'Localize anatomical structures in a chest X-ray (MedGemma 1.5-4b-it) as labeled bounding boxes only — no pathology assertions, no findings. Only call this when precise spatial localization is itself diagnostically relevant: verifying device/hardware position relative to an anatomic landmark, localizing an unusual mass/lesion/foreign body, or the user explicitly asks where something is. One of the slower tools (~2 minutes) — skip for routine screening.',
     parameters: {
-      input: { type: 'string', required: true, description: 'Absolute path to the chest X-ray (PNG, JPG, or DICOM .dcm).' },
+      input: { type: 'string', required: true, description: 'Absolute path to the chest X-ray (PNG, JPG, or DICOM .dcm).' + IMAGE_INPUT_NOTE },
       anatomy: { type: 'array', items: { type: 'string' }, description: 'Specific anatomical structure names to localize (optional — omit to let the model choose).' },
       gpu: { type: 'integer', description: 'GPU index (-1 for CPU). Default -1 (CPU).' },
     },
@@ -377,7 +480,7 @@ export function apply(ctx, config = {}) {
     },
     isConcurrencySafe: () => false,
     async execute(args, exec) {
-      const cliArgs = ['--input', args.input, '--gpu', String(args.gpu ?? -1)]
+      const cliArgs = ['--input', await resolveImageInput(ctx, exec, args.input), '--gpu', String(args.gpu ?? -1)]
       if (args.anatomy !== undefined && args.anatomy.length > 0) cliArgs.push('--anatomy', ...args.anatomy)
       const value = await run(SCRIPTS.xrayAnatomy, cliArgs, exec.signal)
       return attachPreview(ctx, exec, value)
@@ -388,8 +491,8 @@ export function apply(ctx, config = {}) {
     name: 'xray_longitudinal_comparison',
     description: 'Compare a prior (earlier) chest X-ray to the current one for interval change using MedGemma 1.5\'s longitudinal comparison (Improved/Stable/Worsened across consolidation, edema, pleural effusion, pneumonia, pneumothorax). A genuine two-image visual comparison — only call this when the user provided or referenced an actual prior/earlier image, not for a single-image read.',
     parameters: {
-      input: { type: 'string', required: true, description: 'Absolute path to the current (most recent) frontal chest X-ray.' },
-      prior: { type: 'string', required: true, description: 'Absolute path to the prior (earlier) frontal chest X-ray for the SAME patient.' },
+      input: { type: 'string', required: true, description: 'Absolute path to the current (most recent) frontal chest X-ray.' + IMAGE_INPUT_NOTE },
+      prior: { type: 'string', required: true, description: 'Absolute path to the prior (earlier) frontal chest X-ray for the SAME patient.' + IMAGE_INPUT_NOTE },
       indication: { type: 'string', description: 'Clinical indication, e.g. "Follow-up for pneumonia."' },
       gpu: { type: 'integer', description: 'GPU index (-1 for CPU). Default 2.' },
     },
@@ -399,7 +502,9 @@ export function apply(ctx, config = {}) {
     },
     isConcurrencySafe: () => false,
     async execute(args, exec) {
-      const cliArgs = ['--input', args.input, '--prior', args.prior, '--gpu', String(args.gpu ?? 2)]
+      const input = await resolveImageInput(ctx, exec, args.input)
+      const prior = await resolveImageInput(ctx, exec, args.prior)
+      const cliArgs = ['--input', input, '--prior', prior, '--gpu', String(args.gpu ?? 2)]
       if (args.indication !== undefined) cliArgs.push('--indication', args.indication)
       const value = await run(SCRIPTS.xrayLongitudinal, cliArgs, exec.signal)
       return attachPreview(ctx, exec, value)
@@ -410,7 +515,7 @@ export function apply(ctx, config = {}) {
     name: 'xray_report_medgemma',
     description: 'Generate a chest X-ray radiology report with MedGemma 4B. Plain narrative findings text. Loads a multi-GB model onto a GPU, so a single call can take minutes.',
     parameters: {
-      input: { type: 'string', required: true, description: 'Absolute path to the frontal chest X-ray (PNG, JPG, or DICOM .dcm).' },
+      input: { type: 'string', required: true, description: 'Absolute path to the frontal chest X-ray (PNG, JPG, or DICOM .dcm).' + IMAGE_INPUT_NOTE },
       indication: { type: 'string', description: 'Clinical indication, e.g. "Shortness of breath."' },
       max_new_tokens: { type: 'integer', description: 'Max new tokens to generate. Default 512.' },
       gpu: { type: 'integer', description: 'GPU index (-1 for CPU). Default 0.' },
@@ -421,7 +526,7 @@ export function apply(ctx, config = {}) {
     },
     isConcurrencySafe: () => false,
     async execute(args, exec) {
-      const cliArgs = ['--input', args.input, '--gpu', String(args.gpu ?? 0)]
+      const cliArgs = ['--input', await resolveImageInput(ctx, exec, args.input), '--gpu', String(args.gpu ?? 0)]
       if (args.indication !== undefined) cliArgs.push('--indication', args.indication)
       cliArgs.push('--max_new_tokens', String(args.max_new_tokens ?? 512))
       const value = await run(SCRIPTS.xrayMedgemma, cliArgs, exec.signal)
@@ -431,13 +536,13 @@ export function apply(ctx, config = {}) {
 
   ctx.tools.register(defineTool({
     name: 'ct_report_medgemma',
-    description: 'Generate a CT radiology report candidate with MedGemma 4B. MedGemma is a 2D image-text model, so this converts the CT volume into a fixed axial-slice montage first — treat the result as a complementary candidate, not a substitute for a native 3D CT model. Loads a multi-GB model onto a GPU, so a single call can take minutes.',
+    description: 'Generate a CT radiology report candidate with MedGemma 1.5 4B. MedGemma 1.5 is trained to interpret a 3D CT volume as a sequence of per-slice images, each windowed into wide/soft-tissue/brain Hounsfield-unit channels (Google\'s own reference technique) — not a flattened montage. Treat the result as a complementary candidate, not a substitute for a native 3D CT model. Loads a multi-GB model onto a GPU; more slices means more inference time, so a single call can take several minutes.',
     parameters: {
       input: { type: 'string', required: true, description: 'Absolute path to a .nii/.nii.gz CT volume, or a directory containing one DICOM series.' },
       study_id: { type: 'string', description: 'Study identifier to echo back in the result (optional, for your own bookkeeping).' },
       indication: { type: 'string', description: 'Clinical indication, e.g. "Abdominal pain, rule out appendicitis."' },
-      n_slices: { type: 'integer', description: 'Number of axial slices sampled into the montage. Default 16.' },
-      max_new_tokens: { type: 'integer', description: 'Max new tokens to generate. Default 512.' },
+      n_slices: { type: 'integer', description: 'Number of axial slices uniformly sampled and sent to the model, one per SLICE block. Default 32 (Google\'s own notebook demo uses up to 85 — more slices costs proportionally more inference time).' },
+      max_new_tokens: { type: 'integer', description: 'Max new tokens to generate. Default 1024.' },
       gpu: { type: 'integer', description: 'GPU index (-1 for CPU). Default 0.' },
     },
     output: {
@@ -449,9 +554,59 @@ export function apply(ctx, config = {}) {
       const cliArgs = ['--input', args.input, '--gpu', String(args.gpu ?? 0)]
       if (args.study_id !== undefined) cliArgs.push('--study_id', args.study_id)
       if (args.indication !== undefined) cliArgs.push('--indication', args.indication)
-      cliArgs.push('--n_slices', String(args.n_slices ?? 16))
-      cliArgs.push('--max_new_tokens', String(args.max_new_tokens ?? 512))
+      cliArgs.push('--n_slices', String(args.n_slices ?? 32))
+      cliArgs.push('--max_new_tokens', String(args.max_new_tokens ?? 1024))
       const value = await run(SCRIPTS.ctMedgemma, cliArgs, exec.signal)
+      return attachPreview(ctx, exec, value)
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'mri_report_medgemma',
+    description: 'Generate an MRI radiology report candidate with MedGemma 1.5 4B, using the same per-slice-sequence technique as ct_report_medgemma. UNOFFICIAL: Google only publishes this per-slice-sequence technique for CT (fixed Hounsfield-unit windows); no equivalent MRI reference exists, so each slice here is instead normalized by its own 0.5-99.5 percentile intensity range (matching BiomedParse\'s own MRI normalization convention) — treat this as a more speculative candidate than the CT tool, not a substitute for a native 3D MRI model. Loads a multi-GB model onto a GPU; more slices means more inference time, so a single call can take several minutes.',
+    parameters: {
+      input: { type: 'string', required: true, description: 'Absolute path to a .nii/.nii.gz MRI volume, or a directory containing one DICOM series.' },
+      study_id: { type: 'string', description: 'Study identifier to echo back in the result (optional, for your own bookkeeping).' },
+      indication: { type: 'string', description: 'Clinical indication, e.g. "Headache, rule out mass lesion."' },
+      n_slices: { type: 'integer', description: 'Number of slices uniformly sampled and sent to the model, one per SLICE block. Default 32 — more slices costs proportionally more inference time.' },
+      max_new_tokens: { type: 'integer', description: 'Max new tokens to generate. Default 1024.' },
+      gpu: { type: 'integer', description: 'GPU index (-1 for CPU). Default 0.' },
+    },
+    output: {
+      schema: outputSchema('success'),
+      render: (_args, value) => renderReport(value),
+    },
+    isConcurrencySafe: () => false,
+    async execute(args, exec) {
+      const cliArgs = ['--input', args.input, '--gpu', String(args.gpu ?? 0)]
+      if (args.study_id !== undefined) cliArgs.push('--study_id', args.study_id)
+      if (args.indication !== undefined) cliArgs.push('--indication', args.indication)
+      cliArgs.push('--n_slices', String(args.n_slices ?? 32))
+      cliArgs.push('--max_new_tokens', String(args.max_new_tokens ?? 1024))
+      const value = await run(SCRIPTS.mriMedgemma, cliArgs, exec.signal)
+      return attachPreview(ctx, exec, value)
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'retinal_report_medgemma',
+    description: 'Generate a retinal (fundus) ophthalmology report with MedGemma 4B. Plain narrative findings text — MedGemma\'s image encoder is pre-trained on fundus images alongside chest X-ray, dermatology, and histopathology. Loads a multi-GB model onto a GPU, so a single call can take minutes.',
+    parameters: {
+      input: { type: 'string', required: true, description: 'Absolute path to the retinal (fundus) photograph (PNG or JPG).' + IMAGE_INPUT_NOTE },
+      indication: { type: 'string', description: 'Clinical indication, e.g. "Diabetic retinopathy screening."' },
+      max_new_tokens: { type: 'integer', description: 'Max new tokens to generate. Default 512.' },
+      gpu: { type: 'integer', description: 'GPU index (-1 for CPU). Default 0.' },
+    },
+    output: {
+      schema: outputSchema('success'),
+      render: (_args, value) => renderReport(value),
+    },
+    isConcurrencySafe: () => false,
+    async execute(args, exec) {
+      const cliArgs = ['--input', await resolveImageInput(ctx, exec, args.input), '--gpu', String(args.gpu ?? 0)]
+      if (args.indication !== undefined) cliArgs.push('--indication', args.indication)
+      cliArgs.push('--max_new_tokens', String(args.max_new_tokens ?? 512))
+      const value = await run(SCRIPTS.retinalMedgemma, cliArgs, exec.signal)
       return attachPreview(ctx, exec, value)
     },
   }))
@@ -517,7 +672,7 @@ export function apply(ctx, config = {}) {
   const BIOMEDPARSE_SETUP_NOTE = 'The first BiomedParse call on this machine clones the model repo, installs ~15 extra Python packages plus a from-source detectron2 build (one-time, ~1-2 minutes), and downloads ~1.5GB of ungated weights (no token needed) — later calls skip straight to inference.'
 
   const biomedparse2dParams = {
-    input: { type: 'string', required: true, description: 'Absolute path to the image (PNG or JPG — unlike the MAIRA-2/MedGemma tools, BiomedParse does not accept DICOM .dcm).' },
+    input: { type: 'string', required: true, description: 'Absolute path to the image (PNG or JPG — unlike the MAIRA-2/MedGemma tools, BiomedParse does not accept DICOM .dcm).' + IMAGE_INPUT_NOTE },
     prompts: { type: 'array', items: { type: 'string' }, required: true, description: 'Findings or structures to segment, e.g. ["consolidation", "pleural effusion"]. One overlay is generated per prompt.' },
     output_dir: { type: 'string', description: 'Directory to write overlay/mask images into (optional — defaults to a fresh temp directory).' },
     gpu: { type: 'integer', description: 'GPU index (-1 for CPU). Default 0.' },
@@ -536,7 +691,8 @@ export function apply(ctx, config = {}) {
     output: { schema: outputSchema('success'), render: (_args, value) => renderBiomedparse2d(value) },
     isConcurrencySafe: () => false,
     async execute(args, exec) {
-      const value = await run(SCRIPTS.xrayBiomedparse, biomedparse2dCliArgs(args), exec.signal)
+      const input = await resolveImageInput(ctx, exec, args.input)
+      const value = await run(SCRIPTS.xrayBiomedparse, biomedparse2dCliArgs({ ...args, input }), exec.signal)
       return attachPreview(ctx, exec, value)
     },
   }))
@@ -548,7 +704,33 @@ export function apply(ctx, config = {}) {
     output: { schema: outputSchema('success'), render: (_args, value) => renderBiomedparse2d(value) },
     isConcurrencySafe: () => false,
     async execute(args, exec) {
-      const value = await run(SCRIPTS.ultrasoundBiomedparse, biomedparse2dCliArgs(args), exec.signal)
+      const input = await resolveImageInput(ctx, exec, args.input)
+      const value = await run(SCRIPTS.ultrasoundBiomedparse, biomedparse2dCliArgs({ ...args, input }), exec.signal)
+      return attachPreview(ctx, exec, value)
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'ultrasound_classify_biomedclip',
+    description: 'Zero-shot classification of an ultrasound image with BiomedCLIP (~200M params) — picks the best-matching label from a list, it does not invent new categories. Useful to disambiguate a vague segmentation request before calling ultrasound_segmentation_biomedparse (e.g. classify anatomy/pathology first, then pass the winning label as a segmentation prompt) — a close spread across all candidate probabilities means none of them fit well. Built-in panels: anatomy (what kind of scan is this), breast, thyroid, cardiac, general (lesion/cyst/calcification/fluid/vascular); or free-form via task="cls" with custom labels.',
+    parameters: {
+      input: { type: 'string', required: true, description: 'Absolute path to the ultrasound image (PNG or JPG).' + IMAGE_INPUT_NOTE },
+      task: { type: 'string', enum: ['anatomy', 'breast', 'thyroid', 'cardiac', 'general', 'cls'], required: true, description: 'Built-in label panel, or "cls" for a free-form list via labels.' },
+      labels: { type: 'array', items: { type: 'string' }, description: 'Custom candidate labels, e.g. ["normal kidney", "kidney cyst", "kidney stone"]. Required when task is "cls"; ignored otherwise.' },
+      gpu: { type: 'integer', description: 'GPU index (-1 for CPU). Default 0.' },
+    },
+    output: {
+      schema: outputSchema('success'),
+      render: (_args, value) => renderClassification(value),
+    },
+    isConcurrencySafe: () => false,
+    async execute(args, exec) {
+      if (args.task === 'cls' && (args.labels === undefined || args.labels.length === 0)) {
+        throw new Error('labels is required when task is "cls"')
+      }
+      const cliArgs = ['--input', await resolveImageInput(ctx, exec, args.input), '--task', args.task, '--gpu', String(args.gpu ?? 0)]
+      if (args.labels !== undefined && args.labels.length > 0) cliArgs.push('--labels', args.labels.join(','))
+      const value = await run(SCRIPTS.ultrasoundBiomedclip, cliArgs, exec.signal)
       return attachPreview(ctx, exec, value)
     },
   }))
@@ -560,7 +742,8 @@ export function apply(ctx, config = {}) {
     output: { schema: outputSchema('success'), render: (_args, value) => renderBiomedparse2d(value) },
     isConcurrencySafe: () => false,
     async execute(args, exec) {
-      const value = await run(SCRIPTS.retinalBiomedparse, biomedparse2dCliArgs(args), exec.signal)
+      const input = await resolveImageInput(ctx, exec, args.input)
+      const value = await run(SCRIPTS.retinalBiomedparse, biomedparse2dCliArgs({ ...args, input }), exec.signal)
       return attachPreview(ctx, exec, value)
     },
   }))
@@ -617,4 +800,9 @@ export function apply(ctx, config = {}) {
       return attachPreview(ctx, exec, value)
     },
   }))
+
+  // Image-capable twin routes: without these, DSH rejects a pasted image on a
+  // text-only route before any tool can see it. Each twin declares image input
+  // and rewrites image blocks into attachment-id markers for the text model.
+  applyVisionRoutes(ctx, config)
 }
