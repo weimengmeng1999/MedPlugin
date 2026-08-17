@@ -9,11 +9,13 @@
   },
   "exports": {
     ".": "./index.js",
+    "./client": "./client/index.js",
     "./package.json": "./package.json",
     "./cordis.patch.yml": "./cordis.patch.yml"
   },
   "files": [
     "index.js",
+    "client",
     "cordis.patch.yml",
     "lib",
     "skills/_bootstrap.py",
@@ -61,13 +63,23 @@
     "retinal-imaging"
   ],
   "dsh": {
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-ui-tool"
+      ],
+      "platform": "web"
+    },
     "bundle": {
       "patch": "./cordis.patch.yml"
     }
   },
   "peerDependencies": {
+    "@deepseek-ai/dsh-client-runtime": ">=0.1.0-rc.5",
+    "@deepseek-ai/dsh-client-ui-tool": ">=0.1.0-rc.5",
     "@deepseek-ai/dsh-llm": ">=0.1.0-rc.6",
-    "@deepseek-ai/dsh-tools": ">=0.1.0-rc.5"
+    "@deepseek-ai/dsh-tools": ">=0.1.0-rc.5",
+    "react": "^18.2.0"
   },
   "devDependencies": {
     "@deepseek-ai/dsh-tools": "^0.1.0-rc.6"

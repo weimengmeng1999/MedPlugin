@@ -1,11 +1,11 @@
-<h1 align="center">DeepSeek Harness × MedOmni: Building the Plugin for DeepSeek Harness Using a Taste of MedOmni</h1>
+<h1 align="center">DeepSeek Harness × MedOmni: A Composable Agentic Framework for Biomedical Image Analysis</h1>
 
 <p align="center"><strong>Medical-imaging specialist tools for DeepSeek Harness as a plugin</strong></p>
 
 <p align="center">While building MedOmni, we found that DeepSeek Harness changes how you think about multi-agent systems: every step traces cleanly, which makes it the ideal framework for debugging and operating an agentic system. This plugin is our way of giving DeepSeek Harness a taste of MedOmni — a small, real slice of the medical-imaging tool library MedOmni is built around.</p>
 
 <p align="center">
-  <img src="assets/preview_workflow.png" width="100%" alt="MedPlugin workflow: a user request is routed by the DeepSeek Harness agent to a modality-specific tool (X-ray, CT, MRI, ultrasound, retinal), backed by MAIRA-2 / MedGemma / TotalSegmentator / BiomedParse / BiomedCLIP running in one shared Python venv, returning a structured result plus a preview image." />
+  <img src="assets/preview_workflow.svg" width="100%" alt="MedPlugin workflow: a user request is routed by the DeepSeek Harness agent to a modality-specific tool (X-ray, CT, MRI, ultrasound, retinal), backed by MAIRA-2 / MedGemma / TotalSegmentator / BiomedParse / BiomedCLIP running in one shared Python venv, returning a structured result plus a preview image." />
 </p>
 
 <p align="center">
