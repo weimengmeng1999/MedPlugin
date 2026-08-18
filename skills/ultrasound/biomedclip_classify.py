@@ -68,6 +68,11 @@ _PANELS = {
         "breast cyst ultrasound",
         "breast fibroadenoma ultrasound",
     ],
+    "busi": [
+        "normal breast ultrasound",
+        "benign breast tumor ultrasound",
+        "malignant breast tumor ultrasound",
+    ],
     "thyroid": [
         "normal thyroid ultrasound",
         "benign thyroid nodule ultrasound",
@@ -142,7 +147,7 @@ def classify(image, labels: list[str], gpu: int) -> dict:
 def main():
     parser = argparse.ArgumentParser(description="BiomedCLIP zero-shot ultrasound classification")
     parser.add_argument("--task", "-t", required=True, choices=list(_PANELS.keys()) + ["cls"],
-                        help="Built-in panels: anatomy | breast | thyroid | cardiac | general. Free-form: cls (requires --labels)")
+                        help="Built-in panels: anatomy | breast | busi | thyroid | cardiac | general. Free-form: cls (requires --labels)")
     parser.add_argument("--input", "-i", required=True, help="Ultrasound image (PNG or JPG)")
     parser.add_argument("--labels", default=None, help="Comma-separated label list for --task cls")
     parser.add_argument("--output", "-o", default=None, help="Path to write result JSON (optional)")

@@ -168,7 +168,12 @@ function outputSchema(successStatus) {
 }
 
 function renderResult(value, formatSuccess) {
-  if (value.status === 'error') return `Error: ${value.error}`
+  if (value.status === 'error') {
+    const trace = typeof value.traceback === 'string' && value.traceback !== ''
+      ? `\n\nTraceback:\n${value.traceback.slice(-4000)}`
+      : ''
+    return `Error: ${value.error}${trace}`
+  }
   return formatSuccess(value)
 }
 
@@ -206,7 +211,27 @@ function withPreviewNote(text, value) {
 function renderReport(value) {
   const text = renderResult(value, (v) => {
     const report = typeof v.report_text === 'string' ? v.report_text : '(no report_text in output)'
-    return typeof v.preprocessing_note === 'string' ? `${report}\n\n(${v.preprocessing_note})` : report
+    const lines = []
+    if (typeof v.mode === 'string') {
+      lines.push(`Mode: ${v.mode}`)
+      if (v.mode === 'grounded_report') {
+        lines.push(`Grounding: ${v.n_with_boxes ?? 0} of ${v.n_findings ?? 0} finding(s) have boxes.`)
+      } else if (v.mode === 'phrase_grounding' && typeof v.phrase === 'string') {
+        lines.push(`Phrase: ${v.phrase}`)
+      }
+    }
+    lines.push(report)
+    const findings = Array.isArray(v.findings) ? v.findings : []
+    if (findings.length > 0) {
+      lines.push('Grounded findings:')
+      for (const [index, finding] of findings.entries()) {
+        const boxes = Array.isArray(finding.boxes_original) ? finding.boxes_original : []
+        const suffix = boxes.length > 0 ? ` (${boxes.length} box${boxes.length === 1 ? '' : 'es'})` : ' (no box)'
+        lines.push(`${index + 1}. ${finding.text}${suffix}`)
+      }
+    }
+    if (typeof v.preprocessing_note === 'string') lines.push(`(${v.preprocessing_note})`)
+    return lines.join('\n')
   })
   return [{ type: 'text', text: withPreviewNote(text, value) }, ...previewBlocks(value)]
 }
@@ -218,6 +243,7 @@ function renderClassification(value) {
     const ranked = Object.entries(probs).sort((a, b) => b[1] - a[1])
     const lines = [`Prediction: ${v.prediction} (confidence ${v.confidence})`]
     if (ranked.length > 0) lines.push(ranked.map(([label, p]) => `${label}: ${p}`).join(', '))
+    lines.push('Note: this is forced-choice zero-shot classification over the provided labels, not a calibrated diagnosis.')
     return lines.join('\n')
   })
   return [{ type: 'text', text: withPreviewNote(text, value) }, ...previewBlocks(value)]
@@ -251,7 +277,50 @@ function renderBiomedparse2d(value) {
   const text = renderResult(value, (v) => {
     const outputs = Array.isArray(v.outputs) ? v.outputs : []
     if (outputs.length === 0) return 'No prompts segmented.'
-    return outputs.map(o => `${o.prompt}: ${o.coverage_pct}% of image (score ${o.score})`).join('\n')
+    const lines = outputs.map(o => `${o.prompt}: ${o.coverage_pct}% of image (mask peak probability ${o.score})`)
+    if (outputs.length > 1) {
+      lines.push('Note: similar masks across different prompts indicate shared localization, not proof of the prompt category or benign/malignant status.')
+    } else {
+      lines.push('Note: the mask localizes the prompted region; it does not classify benign vs malignant by itself.')
+    }
+    return lines.join('\n')
+  })
+  return [{ type: 'text', text: withPreviewNote(text, value) }, ...previewBlocks(value)]
+}
+
+function renderUltrasoundClassifyThenSegment(value) {
+  const text = renderResult(value, (v) => {
+    const lines = []
+    const classifications = Array.isArray(v.classifications) ? v.classifications : []
+    if (classifications.length > 0) {
+      lines.push('Classification:')
+      for (const cls of classifications) {
+        if (cls.status === 'success') {
+          lines.push(`- ${cls.stage} (${cls.task}): ${cls.prediction} (forced-choice confidence ${cls.confidence})`)
+          const probs = cls.probabilities && typeof cls.probabilities === 'object' ? cls.probabilities : {}
+          const ranked = Object.entries(probs).sort((a, b) => b[1] - a[1])
+          if (ranked.length > 0) lines.push(`  ${ranked.map(([label, p]) => `${label}: ${p}`).join(', ')}`)
+        } else {
+          lines.push(`- ${cls.stage} (${cls.task}): error: ${cls.error}`)
+        }
+      }
+    }
+    const seg = v.segmentation
+    if (seg && seg.status === 'success') {
+      const outputs = Array.isArray(seg.outputs) ? seg.outputs : []
+      lines.push('Segmentation localization:')
+      if (outputs.length === 0) {
+        lines.push('- No prompts segmented.')
+      } else {
+        for (const o of outputs) lines.push(`- ${o.prompt}: ${o.coverage_pct}% of image (mask peak probability ${o.score})`)
+      }
+    } else if (seg && seg.status === 'skipped') {
+      lines.push(`Segmentation localization: skipped (${seg.reason})`)
+    } else if (seg && seg.status === 'error') {
+      lines.push(`Segmentation localization: error: ${seg.error}`)
+    }
+    lines.push('Note: classification is forced-choice zero-shot over the selected labels; segmentation only localizes prompted regions and does not establish cyst/solid or benign/malignant status.')
+    return lines.join('\n')
   })
   return [{ type: 'text', text: withPreviewNote(text, value) }, ...previewBlocks(value)]
 }
@@ -403,20 +472,75 @@ export function apply(ctx, config = {}) {
   }
 
   ctx.tools.register(defineTool({
-    name: 'xray_report_maira',
-    description: 'Generate a chest X-ray radiology report with MAIRA-2. Supports plain report, grounded report (findings with bounding boxes), or locating a single phrase on the image. Loads a multi-GB model onto a GPU, so a single call can take minutes; the first call also downloads ~14GB of gated weights (requires HF_TOKEN).',
+    name: 'xray_grounded_report_maira',
+    description: 'Generate a grounded MAIRA-2 chest X-ray report with finding evidence/bounding boxes. Prefer this for specific suspected findings, trauma/fall, fracture, pneumothorax, pleural effusion, consolidation, or "is there ...?" questions. This tool always runs MAIRA-2 in grounded_report mode; use it when the answer needs evidence/localization or fracture-focused assessment. Do not use anatomy localization or BiomedParse segmentation for these questions.',
     parameters: {
       input: { type: 'string', required: true, description: 'Absolute path to the frontal chest X-ray (PNG, JPG, or DICOM .dcm).' + IMAGE_INPUT_NOTE },
       lateral: { type: 'string', description: 'Absolute path to a lateral view from the same study (optional but recommended).' + IMAGE_INPUT_NOTE },
       prior: { type: 'string', description: 'Absolute path to a prior frontal X-ray (optional).' + IMAGE_INPUT_NOTE },
       prior_report: { type: 'string', description: 'Prior radiology report text (optional, used with prior).' },
-      indication: { type: 'string', description: 'Clinical indication, e.g. "Dyspnea."' },
+      indication: { type: 'string', required: true, description: 'Clinical indication or focused question copied from the user, e.g. "69-year-old woman with fall, productive cough, fever and dyspnea. Assess for pneumothorax and rib fracture." If none is provided, use "No clinical indication provided; general CXR read."' },
+      technique: { type: 'string', description: 'Technique, e.g. "AP portable chest radiograph."' },
+      comparison: { type: 'string', description: 'Comparison, e.g. "None." or "Compared to 01/01/2024."' },
+      gpu: { type: 'integer', description: 'GPU index (-1 for CPU). Default 2.' },
+    },
+    output: {
+      schema: outputSchema('success'),
+      render: (_args, value) => renderReport(value),
+    },
+    isConcurrencySafe: () => false,
+    async execute(args, exec) {
+      const input = await resolveImageInput(ctx, exec, args.input)
+      const cliArgs = ['--input', input]
+      if (args.lateral !== undefined) cliArgs.push('--lateral', await resolveImageInput(ctx, exec, args.lateral))
+      if (args.prior !== undefined) cliArgs.push('--prior', await resolveImageInput(ctx, exec, args.prior))
+      if (args.prior_report !== undefined) cliArgs.push('--prior_report', args.prior_report)
+      if (args.indication !== undefined) cliArgs.push('--indication', args.indication)
+      if (args.technique !== undefined) cliArgs.push('--technique', args.technique)
+      if (args.comparison !== undefined) cliArgs.push('--comparison', args.comparison)
+      cliArgs.push('--mode', 'grounded_report')
+      cliArgs.push('--gpu', String(args.gpu ?? 2))
+      const value = await run(SCRIPTS.xrayMaira, cliArgs, exec.signal)
+      return attachPreview(ctx, exec, value)
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'xray_phrase_grounding_maira',
+    description: 'Locate one exact named chest X-ray finding phrase with MAIRA-2 phrase grounding. Use this after a report has named a finding, or when the user explicitly asks to locate a specific suspected finding such as "left 7th rib fracture", "pneumothorax", "pleural effusion", or "left lower lobe consolidation". This is the preferred CXR finding-localization tool. Do not use BiomedParse segmentation for this unless the user explicitly asks for a mask/segmentation overlay.',
+    parameters: {
+      input: { type: 'string', required: true, description: 'Absolute path to the frontal chest X-ray (PNG, JPG, or DICOM .dcm).' + IMAGE_INPUT_NOTE },
+      phrase: { type: 'string', required: true, description: 'Exact finding phrase to ground, e.g. "left 7th rib fracture".' },
+      gpu: { type: 'integer', description: 'GPU index (-1 for CPU). Default 2.' },
+    },
+    output: {
+      schema: outputSchema('success'),
+      render: (_args, value) => renderReport(value),
+    },
+    isConcurrencySafe: () => false,
+    async execute(args, exec) {
+      const input = await resolveImageInput(ctx, exec, args.input)
+      const cliArgs = ['--input', input, '--mode', 'phrase_grounding', '--phrase', args.phrase, '--gpu', String(args.gpu ?? 2)]
+      const value = await run(SCRIPTS.xrayMaira, cliArgs, exec.signal)
+      return attachPreview(ctx, exec, value)
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'xray_report_maira',
+    description: 'Generate a chest X-ray radiology report with MAIRA-2. Use this for broad CXR report generation or when the caller needs explicit MAIRA mode control. For specific suspected findings, trauma/fall, fracture, pneumothorax, pleural effusion, consolidation, or "is there ...?" questions, prefer xray_grounded_report_maira because it always runs grounded_report mode. Use mode="phrase_grounding" only when the task is to localize one exact named phrase. Loads a multi-GB model onto a GPU, so a single call can take minutes; the first call also downloads ~14GB of gated weights (requires HF_TOKEN).',
+    parameters: {
+      input: { type: 'string', required: true, description: 'Absolute path to the frontal chest X-ray (PNG, JPG, or DICOM .dcm).' + IMAGE_INPUT_NOTE },
+      lateral: { type: 'string', description: 'Absolute path to a lateral view from the same study (optional but recommended).' + IMAGE_INPUT_NOTE },
+      prior: { type: 'string', description: 'Absolute path to a prior frontal X-ray (optional).' + IMAGE_INPUT_NOTE },
+      prior_report: { type: 'string', description: 'Prior radiology report text (optional, used with prior).' },
+      indication: { type: 'string', required: true, description: 'Clinical indication or focused question copied from the user, e.g. "Dyspnea." If none is provided, use "No clinical indication provided; general CXR read."' },
       technique: { type: 'string', description: 'Technique, e.g. "PA and lateral views."' },
       comparison: { type: 'string', description: 'Comparison, e.g. "None." or "Compared to 01/01/2024."' },
       mode: {
         type: 'string',
         enum: ['report', 'grounded_report', 'phrase_grounding'],
-        description: 'report = plain narrative findings text. grounded_report (default) = findings with bounding boxes. phrase_grounding = locate a phrase on the image (requires phrase).',
+        description: 'report = plain narrative findings text. grounded_report (default) = findings with bounding boxes and is preferred for suspected findings/trauma/fracture/"is there ...?" questions. phrase_grounding = locate one exact named phrase on the image (requires phrase).',
       },
       phrase: { type: 'string', description: 'Phrase to locate on the image. Required when mode is "phrase_grounding".' },
       gpu: { type: 'integer', description: 'GPU index (-1 for CPU). Default 2.' },
@@ -449,7 +573,7 @@ export function apply(ctx, config = {}) {
 
   ctx.tools.register(defineTool({
     name: 'xray_anatomy_localization',
-    description: 'Localize anatomical structures in a chest X-ray (MedGemma 1.5-4b-it) as labeled bounding boxes only — no pathology assertions, no findings. Only call this when precise spatial localization is itself diagnostically relevant: verifying device/hardware position relative to an anatomic landmark, localizing an unusual mass/lesion/foreign body, or the user explicitly asks where something is. One of the slower tools (~2 minutes) — skip for routine screening.',
+    description: 'Localize normal anatomical structures in a chest X-ray (MedGemma 1.5-4b-it) as labeled bounding boxes only. This is not an abnormality detector and does not produce a radiology report, pathology assertions, fractures, or findings. Do not call this for questions like "what abnormalities are present?", cough, breathlessness, screening, diagnosis, or routine CXR interpretation; call xray_grounded_report_maira or xray_report_medgemma instead. Use xray_phrase_grounding_maira to locate a named finding such as "left 7th rib fracture"; use this anatomy tool only when the user explicitly asks to locate a named normal anatomical structure such as "left 7th rib". One of the slower tools (~2 minutes).',
     parameters: {
       input: { type: 'string', required: true, description: 'Absolute path to the chest X-ray (PNG, JPG, or DICOM .dcm).' + IMAGE_INPUT_NOTE },
       anatomy: { type: 'array', items: { type: 'string' }, description: 'Specific anatomical structure names to localize (optional — omit to let the model choose).' },
@@ -494,10 +618,10 @@ export function apply(ctx, config = {}) {
 
   ctx.tools.register(defineTool({
     name: 'xray_report_medgemma',
-    description: 'Generate a chest X-ray radiology report with MedGemma 4B. Plain narrative findings text. Loads a multi-GB model onto a GPU, so a single call can take minutes.',
+    description: 'Generate a chest X-ray radiology report with MedGemma 4B. Use this for plain narrative CXR report generation and broad clinical questions like cough, dyspnea, suspected infection, chronic lung disease, or a general single-image read. For specific suspected findings, trauma/fall, fracture, pneumothorax, pleural effusion, consolidation, or "is there ...?" questions, prefer xray_report_maira with mode="grounded_report" and use MedGemma only as a secondary narrative cross-check. Loads a multi-GB model onto a GPU, so a single call can take minutes.',
     parameters: {
       input: { type: 'string', required: true, description: 'Absolute path to the frontal chest X-ray (PNG, JPG, or DICOM .dcm).' + IMAGE_INPUT_NOTE },
-      indication: { type: 'string', description: 'Clinical indication, e.g. "Shortness of breath."' },
+      indication: { type: 'string', required: true, description: 'Clinical indication or focused question copied from the user, e.g. "Shortness of breath." If none is provided, use "No clinical indication provided; general CXR read."' },
       max_new_tokens: { type: 'integer', description: 'Max new tokens to generate. Default 512.' },
       gpu: { type: 'integer', description: 'GPU index (-1 for CPU). Default 0.' },
     },
@@ -654,7 +778,7 @@ export function apply(ctx, config = {}) {
 
   const biomedparse2dParams = {
     input: { type: 'string', required: true, description: 'Absolute path to the image (PNG or JPG — unlike the MAIRA-2/MedGemma tools, BiomedParse does not accept DICOM .dcm).' + IMAGE_INPUT_NOTE },
-    prompts: { type: 'array', items: { type: 'string' }, required: true, description: 'Findings or structures to segment, e.g. ["consolidation", "pleural effusion"]. One overlay is generated per prompt.' },
+    prompts: { type: 'array', items: { type: 'string' }, required: true, description: 'Named regions/findings to localize with a mask. One overlay is generated per prompt. This is localization, not diagnosis.' },
     output_dir: { type: 'string', description: 'Directory to write overlay/mask images into (optional — defaults to a fresh temp directory).' },
     gpu: { type: 'integer', description: 'GPU index (-1 for CPU). Default 0.' },
   }
@@ -665,9 +789,53 @@ export function apply(ctx, config = {}) {
     return cliArgs
   }
 
+  const ultrasoundClassifyCliArgs = args => {
+    if (args.task === 'cls' && (args.labels === undefined || args.labels.length === 0)) {
+      throw new Error('labels is required when task is "cls"')
+    }
+    const cliArgs = ['--input', args.input, '--task', args.task, '--gpu', String(args.gpu ?? 0)]
+    if (args.labels !== undefined && args.labels.length > 0) cliArgs.push('--labels', args.labels.join(','))
+    return cliArgs
+  }
+
+  const runUltrasoundClassification = async (input, args, stage, task, exec) => {
+    const value = await run(SCRIPTS.ultrasoundBiomedclip, ultrasoundClassifyCliArgs({ ...args, input, task }), exec.signal)
+    return { stage, task, ...value }
+  }
+
+  const taskForDomain = (domain, anatomyPrediction) => {
+    if (domain === 'breast') return 'breast'
+    if (domain === 'busi') return 'busi'
+    if (domain === 'thyroid') return 'thyroid'
+    if (domain === 'cardiac') return 'cardiac'
+    if (domain === 'general') return 'general'
+    if (domain === 'custom') return 'cls'
+    const text = String(anatomyPrediction ?? '').toLowerCase()
+    if (text.includes('breast')) return 'breast'
+    if (text.includes('thyroid')) return 'thyroid'
+    if (text.includes('cardiac') || text.includes('echocardiography')) return 'cardiac'
+    return 'general'
+  }
+
+  const segmentPromptsForPrediction = prediction => {
+    const text = String(prediction ?? '').toLowerCase()
+    if (text.includes('normal')) return []
+    if (text.includes('cyst')) return ['cyst']
+    if (text.includes('calcification')) return ['calcification']
+    if (text.includes('fluid')) return ['fluid collection']
+    if (text.includes('vascular')) return ['vascular abnormality']
+    if (text.includes('fibroadenoma')) return ['breast lesion', 'mass']
+    if (text.includes('tumor') || text.includes('lesion') || text.includes('mass') || text.includes('malignant') || text.includes('benign')) {
+      return ['lesion', 'mass']
+    }
+    return ['lesion']
+  }
+
+  const uniqueStrings = values => [...new Set((values ?? []).filter(v => typeof v === 'string' && v.trim() !== '').map(v => v.trim()))]
+
   ctx.tools.register(defineTool({
     name: 'xray_segmentation_biomedparse',
-    description: `Text-prompted segmentation of findings/structures in a chest X-ray with BiomedParse. ${BIOMEDPARSE_SETUP_NOTE}`,
+    description: `Text-prompted mask segmentation in a chest X-ray with BiomedParse. This is not a chest X-ray report tool and should not be used to answer "what abnormalities/findings are present?", cough, dyspnea, screening, routine CXR interpretation, fracture assessment, or ordinary "locate this finding" requests. Call xray_grounded_report_maira or xray_report_medgemma first for disease interpretation; use xray_phrase_grounding_maira to localize a named CXR finding. Only call this when the user explicitly asks for segmentation, a mask, or a segmentation overlay. BiomedParse can accept disease-like text prompts, but the mask only localizes the prompt and does not validate that the disease is present. ${BIOMEDPARSE_SETUP_NOTE}`,
     parameters: biomedparse2dParams,
     output: { schema: outputSchema('success'), render: (_args, value) => renderBiomedparse2d(value) },
     isConcurrencySafe: () => false,
@@ -680,7 +848,7 @@ export function apply(ctx, config = {}) {
 
   ctx.tools.register(defineTool({
     name: 'ultrasound_segmentation_biomedparse',
-    description: `Text-prompted segmentation of findings/structures in an ultrasound image with BiomedParse. ${BIOMEDPARSE_SETUP_NOTE}`,
+    description: `Text-prompted segmentation of findings/structures in an ultrasound image with BiomedParse. This localizes the prompted region only; do not infer benign/malignant status or cyst vs solid diagnosis from mask coverage, peak probability, or prompt agreement alone. For breast ultrasound diagnosis/category triage, call ultrasound_classify_biomedclip first with task="busi" or task="breast", then use segmentation only to localize the finding. ${BIOMEDPARSE_SETUP_NOTE}`,
     parameters: biomedparse2dParams,
     output: { schema: outputSchema('success'), render: (_args, value) => renderBiomedparse2d(value) },
     isConcurrencySafe: () => false,
@@ -692,11 +860,68 @@ export function apply(ctx, config = {}) {
   }))
 
   ctx.tools.register(defineTool({
-    name: 'ultrasound_classify_biomedclip',
-    description: 'Zero-shot classification of an ultrasound image with BiomedCLIP (~200M params) — picks the best-matching label from a list, it does not invent new categories. Useful to disambiguate a vague segmentation request before calling ultrasound_segmentation_biomedparse (e.g. classify anatomy/pathology first, then pass the winning label as a segmentation prompt) — a close spread across all candidate probabilities means none of them fit well. Built-in panels: anatomy (what kind of scan is this), breast, thyroid, cardiac, general (lesion/cyst/calcification/fluid/vascular); or free-form via task="cls" with custom labels.',
+    name: 'ultrasound_classify_then_segment',
+    description: `Composite ultrasound workflow: classify the image/finding with BiomedCLIP first, then run BiomedParse only to localize the selected finding. Use this instead of manually chaining tools when the domain or finding is uncertain. It keeps classification separate from segmentation and avoids inferring benign/malignant or cyst/solid status from masks. ${BIOMEDPARSE_SETUP_NOTE}`,
     parameters: {
       input: { type: 'string', required: true, description: 'Absolute path to the ultrasound image (PNG or JPG).' + IMAGE_INPUT_NOTE },
-      task: { type: 'string', enum: ['anatomy', 'breast', 'thyroid', 'cardiac', 'general', 'cls'], required: true, description: 'Built-in label panel, or "cls" for a free-form list via labels.' },
+      domain: { type: 'string', enum: ['auto', 'breast', 'busi', 'thyroid', 'cardiac', 'general', 'custom'], description: 'Classification domain. auto first classifies ultrasound anatomy, then chooses a category panel. breast uses benign/malignant/cyst/fibroadenoma labels; busi uses BUSI-style normal/benign/malignant labels; custom uses labels.' },
+      labels: { type: 'array', items: { type: 'string' }, description: 'Custom candidate labels when domain="custom".' },
+      segment_prompts: { type: 'array', items: { type: 'string' }, description: 'Explicit localization prompts. If omitted, safe localization prompts are derived from the classification result, e.g. lesion/mass/cyst rather than diagnostic phrases.' },
+      output_dir: { type: 'string', description: 'Directory to write segmentation overlay/mask images into (optional).' },
+      gpu: { type: 'integer', description: 'GPU index (-1 for CPU). Default 0.' },
+    },
+    output: { schema: outputSchema('success'), render: (_args, value) => renderUltrasoundClassifyThenSegment(value) },
+    isConcurrencySafe: () => false,
+    async execute(args, exec) {
+      const input = await resolveImageInput(ctx, exec, args.input)
+      const domain = args.domain ?? 'auto'
+      const classifications = []
+      let anatomy
+      if (domain === 'auto') {
+        anatomy = await runUltrasoundClassification(input, { ...args, labels: undefined }, 'anatomy', 'anatomy', exec)
+        classifications.push(anatomy)
+      }
+      const categoryTask = taskForDomain(domain, anatomy?.prediction)
+      const category = await runUltrasoundClassification(input, args, 'category', categoryTask, exec)
+      classifications.push(category)
+
+      const prompts = uniqueStrings(args.segment_prompts ?? segmentPromptsForPrediction(category.prediction))
+      let segmentation
+      if (prompts.length === 0) {
+        segmentation = { status: 'skipped', reason: 'classification selected a normal category and no segment_prompts were provided' }
+      } else {
+        segmentation = await run(SCRIPTS.ultrasoundBiomedparse, biomedparse2dCliArgs({
+          input,
+          prompts,
+          output_dir: args.output_dir,
+          gpu: args.gpu,
+        }), exec.signal)
+      }
+
+      const value = {
+        status: 'success',
+        input,
+        domain,
+        category_task: categoryTask,
+        classifications,
+        segment_prompts: prompts,
+        segmentation,
+        interpretation_note: 'Classification is forced-choice zero-shot over selected labels; segmentation localizes prompted regions only.',
+      }
+      if (segmentation && segmentation.status === 'success') {
+        value.preview_image_paths = segmentation.preview_image_paths
+        value.outputs = segmentation.outputs
+      }
+      return attachPreview(ctx, exec, value)
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'ultrasound_classify_biomedclip',
+    description: 'Zero-shot classification of an ultrasound image with BiomedCLIP (~200M params) — picks the best-matching label from a list, it does not invent new categories and is not calibrated diagnostic certainty. Useful to disambiguate a vague segmentation request before calling ultrasound_segmentation_biomedparse (e.g. classify anatomy/pathology first, then pass the winning label as a segmentation prompt) — a close spread across all candidate probabilities means none of them fit well. Built-in panels: anatomy (what kind of scan this is), breast, busi (normal/benign/malignant breast tumor-style labels), thyroid, cardiac, general (lesion/cyst/calcification/fluid/vascular); or free-form via task="cls" with custom labels.',
+    parameters: {
+      input: { type: 'string', required: true, description: 'Absolute path to the ultrasound image (PNG or JPG).' + IMAGE_INPUT_NOTE },
+      task: { type: 'string', enum: ['anatomy', 'breast', 'busi', 'thyroid', 'cardiac', 'general', 'cls'], required: true, description: 'Built-in label panel, or "cls" for a free-form list via labels. Use "busi" for BUSI-style normal/benign/malignant breast ultrasound triage.' },
       labels: { type: 'array', items: { type: 'string' }, description: 'Custom candidate labels, e.g. ["normal kidney", "kidney cyst", "kidney stone"]. Required when task is "cls"; ignored otherwise.' },
       gpu: { type: 'integer', description: 'GPU index (-1 for CPU). Default 0.' },
     },
@@ -706,11 +931,8 @@ export function apply(ctx, config = {}) {
     },
     isConcurrencySafe: () => false,
     async execute(args, exec) {
-      if (args.task === 'cls' && (args.labels === undefined || args.labels.length === 0)) {
-        throw new Error('labels is required when task is "cls"')
-      }
-      const cliArgs = ['--input', await resolveImageInput(ctx, exec, args.input), '--task', args.task, '--gpu', String(args.gpu ?? 0)]
-      if (args.labels !== undefined && args.labels.length > 0) cliArgs.push('--labels', args.labels.join(','))
+      const input = await resolveImageInput(ctx, exec, args.input)
+      const cliArgs = ultrasoundClassifyCliArgs({ ...args, input })
       const value = await run(SCRIPTS.ultrasoundBiomedclip, cliArgs, exec.signal)
       return attachPreview(ctx, exec, value)
     },

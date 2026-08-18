@@ -300,6 +300,7 @@ def run_2d(input_path, prompts, output_dir, gpu, tag, modality):
             "overlay": str(overlay_path),
             "mask": str(mask_path),
             "score": round(seg["score"], 4),
+            "score_kind": "mask_peak_probability",
             "pixel_count": pixel_count,
             "coverage_pct": round(100.0 * pixel_count / mask.size, 2),
         })
@@ -311,6 +312,7 @@ def run_2d(input_path, prompts, output_dir, gpu, tag, modality):
         "modality": modality,
         "input": str(input_path),
         "prompts": prompts,
+        "score_kind": "mask_peak_probability",
         "device": device,
         "outputs": outputs,
         # Attach both the overlay composite (original | segmented) and the

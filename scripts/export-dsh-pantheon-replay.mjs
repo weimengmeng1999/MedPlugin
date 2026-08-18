@@ -151,6 +151,27 @@ function assistantToolCalls(content) {
     }))
 }
 
+function attachmentPath(attachmentId) {
+  if (typeof attachmentId !== 'string' || !attachmentId.startsWith('sha256:')) return undefined
+  const digest = attachmentId.slice('sha256:'.length)
+  return join(process.env.HOME ?? '/home/mwei26', '.dsh/attachments/v1/objects', digest.slice(0, 2), digest)
+}
+
+function pantheonContent(content) {
+  if (!Array.isArray(content)) return content
+  return content
+    .map(block => {
+      if (block?.type !== 'image') return block
+      const path = attachmentPath(block.attachment?.attachmentId)
+      if (path === undefined) return undefined
+      return {
+        type: 'image_url',
+        image_url: { url: path },
+      }
+    })
+    .filter(block => block !== undefined)
+}
+
 function toolResultsFromMessage(message) {
   if (!Array.isArray(message?.content)) return []
   return message.content
@@ -215,7 +236,7 @@ function projectEvents(events, chatId) {
       if (text.trim() === '') continue
       chat.push({
         role: 'user',
-        content: event.data.content,
+        content: pantheonContent(event.data.content),
         chat_id: '',
         id: event.data.id ?? randomUUID(),
       })
@@ -232,7 +253,7 @@ function projectEvents(events, chatId) {
         content: content.trim() === '' ? null : content,
         id: message.id ?? randomUUID(),
         timestamp: seconds(event.time),
-        agent_name: 'DSH',
+        agent_name: 'Leader',
       }
       if (toolCalls.length > 0) record.tool_calls = toolCalls
       if (event.data.usage !== undefined) {
@@ -253,7 +274,7 @@ function projectEvents(events, chatId) {
         result.name = name
         result.id = randomUUID()
         result.timestamp = seconds(event.time)
-        result.agent_name = 'DSH'
+        result.agent_name = 'Leader'
         chat.push(result)
       }
     }
@@ -266,6 +287,32 @@ function projectEvents(events, chatId) {
       name: title ?? basename(session.cwd ?? 'MedPlugin replay'),
       extra_data: {
         last_activity_date: new Date(Math.max(...events.map(event => event.time ?? session.createdAt ?? 0))).toISOString(),
+        project: {
+          workspace_mode: 'project',
+          workspace_path: session.cwd,
+        },
+        team_template: {
+          id: 'dsh',
+          name: 'DeepSeek Harness',
+          description: 'Imported DeepSeek Harness session',
+          icon: 'DSH',
+          category: 'imported',
+          version: '1.0.0',
+          agents: [
+            {
+              id: 'leader',
+              name: 'Leader',
+              model: requestModel?.model ?? 'unknown',
+              description: 'Imported DSH assistant',
+              icon: 'DSH',
+              instructions: '',
+              toolsets: [],
+              tags: [],
+              source_path: '',
+              scope: 'project',
+            },
+          ],
+        },
         source: {
           kind: 'deepseek-harness',
           session_id: session.id,
@@ -409,8 +456,20 @@ function collectReferencedPaths(chat, workdir) {
   return [...paths]
 }
 
-async function writeJsonl(path, records) {
-  await writeFile(path, records.map(record => JSON.stringify(record)).join('\n') + '\n')
+function jsonlText(records) {
+  return records.map(record => JSON.stringify(record)).join('\n') + '\n'
+}
+
+function rewriteBundledPaths(text, manifestFiles) {
+  const rewrites = manifestFiles
+    .map(file => [file.original, `./${file.local}`])
+    .sort((a, b) => b[0].length - a[0].length)
+  let rewritten = text
+  for (const [original, local] of rewrites) {
+    rewritten = rewritten.split(original).join(local)
+    rewritten = rewritten.split(`file://${original}`).join(local)
+  }
+  return rewritten
 }
 
 async function sha256(path) {
@@ -462,8 +521,10 @@ async function main() {
   }
   await collectIncludedArtifacts(workdir, opts.includes, bundleRoot, manifestFiles, copied)
 
-  await writeJsonl(join(bundleRoot, 'chat.jsonl'), projected.chat)
-  await writeFile(join(bundleRoot, 'chat.meta.json'), JSON.stringify(projected.meta, null, 2) + '\n')
+  const chatText = rewriteBundledPaths(jsonlText(projected.chat), manifestFiles)
+  const metaText = rewriteBundledPaths(JSON.stringify(projected.meta, null, 2) + '\n', manifestFiles)
+  await writeFile(join(bundleRoot, 'chat.jsonl'), chatText)
+  await writeFile(join(bundleRoot, 'chat.meta.json'), metaText)
   await writeFile(join(bundleRoot, 'manifest.json'), JSON.stringify({
     version: '1.0',
     chat_id: chatId,

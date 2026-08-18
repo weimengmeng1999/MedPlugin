@@ -18,11 +18,12 @@
 ## Contents
 
 - [What this plugin does](#what-this-plugin-does)
+- [Requirements](#requirements)
 - [Quick start](#quick-start)
 - [Enable the vision route (paste an image)](#enable-the-vision-route-paste-an-image)
 - [Usage examples](#usage-examples)
 - [Tools](#tools)
-- [Requirements](#requirements)
+- [Adding a new tool](#adding-a-new-tool)
 - [Disable / re-enable](#disable--re-enable)
 - [Configure](#configure)
 - [Troubleshooting](#troubleshooting)
@@ -32,6 +33,13 @@
 ## What this plugin does
 
 Each tool shells out to a Python script that self-manages its own shared virtual environment and downloads its own model weights on first use — no manual setup beyond what's listed in [Requirements](#requirements). One tool call in, one structured JSON result plus a preview image out. See the diagram at the top of this page for the full path from a chat message to a report/segmentation/classification result.
+
+## Requirements
+
+- A DeepSeek Harness `dsh` installation.
+- **An NVIDIA GPU with CUDA.** These are multi-GB vision-language and segmentation models — CPU (`gpu: -1`, where a tool exposes it) works but is slow enough to be impractical for anything beyond a quick smoke test.
+- [`uv`](https://docs.astral.sh/uv/), `git`, and Python 3 on `PATH` — every script bootstraps its own shared venv and, for BiomedParse, clones a repo and builds `detectron2` from source on first use.
+- A HuggingFace account + `HF_TOKEN` set in the environment (or `huggingface-cli login` already done) for MAIRA-2 and MedGemma — both are gated models; nothing here can automate accepting that license for you. **BiomedParse and BiomedCLIP are not gated** — no token needed for those tools.
 
 ## Quick start
 
@@ -75,14 +83,13 @@ Set `wrapProviders: false` in the plugin config to disable the twin routes (see 
 **Chest X-ray report:**
 > "Generate a radiology report for this chest X-ray: `/path/to/chest_xray.png`"
 
-calls `xray_report_medgemma` (or `xray_report_maira` for a grounded report with bounding boxes).
+calls `xray_report_medgemma`, `xray_report_maira`, or `xray_grounded_report_maira` when finding evidence/bounding boxes are useful.
 
 **Find something specific, by name, on any of the five modalities:**
-> "Does this chest X-ray show consolidation or pleural effusion?"
 > "Segment the gallstone in this ultrasound image."
 > "Are there any microaneurysms in this fundus photo?"
 
-calls the matching `_segmentation_biomedparse` tool with your finding as the `prompts` argument — BiomedParse takes any free-text finding or anatomical structure, not a fixed list.
+calls the matching `_segmentation_biomedparse` tool only when you ask for segmentation, masks, overlays, or localization. BiomedParse takes any free-text finding or anatomical structure, but its mask is localization, not diagnosis.
 
 **Disambiguate a vague ultrasound request first:**
 > "What's in this ultrasound before you segment anything?"
@@ -109,12 +116,11 @@ calls `xray_longitudinal_comparison` with both images.
 
 Every tool also attaches one or more preview PNGs to its result — inline in the chat on an image-capable route, or saved under `medplugin/previews/` in the session workspace on a text-only route.
 
-## Requirements
+## Adding a new tool
 
-- A DeepSeek Harness `dsh` installation.
-- **An NVIDIA GPU with CUDA.** These are multi-GB vision-language and segmentation models — CPU (`gpu: -1`, where a tool exposes it) works but is slow enough to be impractical for anything beyond a quick smoke test.
-- [`uv`](https://docs.astral.sh/uv/), `git`, and Python 3 on `PATH` — every script bootstraps its own shared venv and, for BiomedParse, clones a repo and builds `detectron2` from source on first use.
-- A HuggingFace account + `HF_TOKEN` set in the environment (or `huggingface-cli login` already done) for MAIRA-2 and MedGemma — both are gated models; nothing here can automate accepting that license for you. **BiomedParse and BiomedCLIP are not gated** — no token needed for those tools.
+New tools should follow the existing pattern: a Python script under `skills/<modality>/`, a `SCRIPTS` entry plus `defineTool` registration in `index.js`, explicit agent-facing instructions in the tool `description`, optional preview attachment support, and package/test updates.
+
+See [Adding a New Tool](ADDING_TOOLS.md) for the full step-by-step checklist and examples.
 
 ## Disable / re-enable
 
@@ -181,7 +187,7 @@ Two categories of specialist tool are deliberately not in this package:
 - **Other model families** beyond MAIRA-2, MedGemma, TotalSegmentator, BiomedParse, and BiomedCLIP are technically fine — each would follow the same self-contained-venv pattern as the tools here — but are out of scope for this package.
 - **Tube/line detection and bone-fracture classification** are excluded for a real technical reason on top of scope: their backing scripts have no isolated-venv bootstrap of their own — they'd import bare `torch`/`transformers` against whatever the ambient Python environment happens to provide, which can silently conflict with a pinned range like MAIRA-2's `transformers>=4.48,<4.52`.
 
-If you want to add tools back in this style, follow the pattern in `index.js`: a `SCRIPTS` entry pointing at a script under `skills/<modality>/`, a matching `defineTool` registration whose `execute` shells out to it and parses its JSON stdout, and `skills/_bootstrap.py`'s bootstrap at the top of the script.
+If you want to add tools back in this style, follow [Adding a New Tool](ADDING_TOOLS.md): a `SCRIPTS` entry pointing at a script under `skills/<modality>/`, a matching `defineTool` registration whose `execute` shells out to it and parses its JSON stdout, explicit agent-facing tool instructions, and `skills/_bootstrap.py`'s bootstrap at the top of the script.
 
 ## License
 

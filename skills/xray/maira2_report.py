@@ -61,6 +61,7 @@ _bootstrap.ensure_venv_and_reexec("maira-2")
 import argparse
 import json
 import tempfile
+import traceback
 
 
 # ── Image loading ─────────────────────────────────────────────────────────────
@@ -141,7 +142,10 @@ def run_report(model, processor, device, frontal, lateral, prior, prior_report,
     )
     processed = processed.to(device)
 
-    max_new_tokens = 450 if get_grounding else 300
+    # Grounded output includes extra markup around phrases and boxes. A short
+    # limit can truncate a delimiter and make MAIRA's processor assert while
+    # parsing the grounded sequence.
+    max_new_tokens = 900 if get_grounding else 300
 
     with torch.no_grad():
         output = model.generate(
@@ -153,7 +157,19 @@ def run_report(model, processor, device, frontal, lateral, prior, prior_report,
     prompt_length = processed["input_ids"].shape[-1]
     decoded = processor.decode(output[0][prompt_length:], skip_special_tokens=True)
     decoded = decoded.lstrip()  # findings completions have a single leading space
-    prediction = processor.convert_output_to_plaintext_or_grounded_sequence(decoded)
+    try:
+        prediction = processor.convert_output_to_plaintext_or_grounded_sequence(decoded)
+    except AssertionError:
+        print(
+            "[maira-2] Grounding parse failed; returning ungrounded decoded text.",
+            file=sys.stderr,
+            flush=True,
+        )
+        prediction = (
+            decoded
+            + "\n\n(MAIRA grounding parse warning: generated grounding markup was incomplete, "
+            + "so no boxes were parsed.)"
+        )
     return prediction
 
 
@@ -177,7 +193,19 @@ def run_phrase_grounding(model, processor, device, frontal, phrase: str):
 
     prompt_length = processed["input_ids"].shape[-1]
     decoded = processor.decode(output[0][prompt_length:], skip_special_tokens=True)
-    prediction = processor.convert_output_to_plaintext_or_grounded_sequence(decoded)
+    try:
+        prediction = processor.convert_output_to_plaintext_or_grounded_sequence(decoded)
+    except AssertionError:
+        print(
+            "[maira-2] Phrase grounding parse failed; returning decoded text.",
+            file=sys.stderr,
+            flush=True,
+        )
+        prediction = (
+            decoded
+            + "\n\n(MAIRA phrase-grounding parse warning: generated grounding markup was incomplete, "
+            + "so no box was parsed.)"
+        )
     return prediction
 
 
@@ -353,11 +381,23 @@ def main():
                 get_grounding= get_grounding,
             )
     except Exception as e:
-        print(json.dumps({"status": "error", "error": f"Inference failed: {e}"}))
+        print(json.dumps({
+            "status": "error",
+            "error": f"Inference failed: {type(e).__name__}: {e}",
+            "traceback": traceback.format_exc(),
+        }))
         sys.exit(1)
 
     # ── Serialise ─────────────────────────────────────────────────────────────
-    pred_dict = serialise_prediction(prediction, frontal_size, processor)
+    try:
+        pred_dict = serialise_prediction(prediction, frontal_size, processor)
+    except Exception as e:
+        print(json.dumps({
+            "status": "error",
+            "error": f"Serialisation failed: {type(e).__name__}: {e}",
+            "traceback": traceback.format_exc(),
+        }))
+        sys.exit(1)
 
     result = {
         "status":     "success",

@@ -9,13 +9,14 @@
   },
   "exports": {
     ".": "./index.js",
-    "./client": "./client/index.js",
+    "./client": "./client.js",
     "./package.json": "./package.json",
     "./cordis.patch.yml": "./cordis.patch.yml"
   },
   "files": [
     "index.js",
-    "client",
+    "client.js",
+    "ADDING_TOOLS.md",
     "cordis.patch.yml",
     "lib",
     "skills/_bootstrap.py",
