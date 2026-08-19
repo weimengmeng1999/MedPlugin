@@ -31,9 +31,7 @@
 
 ## Demo
 
-<video src="https://github.com/weimengmeng1999/MedPlugin/blob/main/assets/demo_dsh-medomni.mp4" controls width="100%">
-  Your browser does not support the video tag. Download the demo video from <a href="assets/demo_dsh-medomni.mp4">assets/demo_dsh-medomni.mp4</a>.
-</video>
+![MedPlugin demo](assets/demo_dsh-medomni.gif)
 
 ## What this plugin does
 
