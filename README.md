@@ -31,7 +31,7 @@
 
 ## Demo
 
-![MedPlugin demo](assets/demo_dsh-medomni.gif)
+<img src="assets/demo_dsh-medomni.gif" alt="MedPlugin demo" width="100%" />
 
 ## What this plugin does
 
