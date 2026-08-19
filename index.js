@@ -211,6 +211,9 @@ function withPreviewNote(text, value) {
 function renderReport(value) {
   const text = renderResult(value, (v) => {
     const report = typeof v.report_text === 'string' ? v.report_text : '(no report_text in output)'
+    const formatBox = box => Array.isArray(box)
+      ? `[${box.map(n => Number.isFinite(Number(n)) ? Number(n).toFixed(2) : String(n)).join(', ')}]`
+      : JSON.stringify(box)
     const lines = []
     if (typeof v.mode === 'string') {
       lines.push(`Mode: ${v.mode}`)
@@ -228,6 +231,9 @@ function renderReport(value) {
         const boxes = Array.isArray(finding.boxes_original) ? finding.boxes_original : []
         const suffix = boxes.length > 0 ? ` (${boxes.length} box${boxes.length === 1 ? '' : 'es'})` : ' (no box)'
         lines.push(`${index + 1}. ${finding.text}${suffix}`)
+        for (const [boxIndex, box] of boxes.entries()) {
+          lines.push(`   box ${boxIndex + 1}: ${formatBox(box)}`)
+        }
       }
     }
     if (typeof v.preprocessing_note === 'string') lines.push(`(${v.preprocessing_note})`)

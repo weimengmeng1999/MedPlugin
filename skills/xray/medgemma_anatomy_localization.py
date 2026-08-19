@@ -38,6 +38,7 @@ import json
 import re
 import tempfile
 import time
+import traceback
 
 
 # ── Default anatomy set (Chest ImaGenome labels) ──────────────────────────────
@@ -174,7 +175,7 @@ def build_prompt(anatomies: list[str]) -> str:
 
 # ── Model loading ─────────────────────────────────────────────────────────────
 
-def load_pipeline(gpu: int):
+def load_pipeline(gpu: int, attn_implementation: str = None):
     """Load MedGemma 1.5-4b-it image-text pipeline."""
     import torch
     from transformers import pipeline
@@ -185,13 +186,19 @@ def load_pipeline(gpu: int):
     if gpu < 0:
         gpu = get_free_gpu(exclude=[0])    # keep GPU 0 for LLM
 
-    device_map = f"cuda:{gpu}" if gpu >= 0 else "cpu"
+    # Use the dict form to avoid Pipeline doing an extra .to(cuda:0). This
+    # matches the other MedGemma tools in this plugin.
+    device_map = {"": f"cuda:{gpu}"} if gpu >= 0 else {"": "cpu"}
     print(f"[medgemma-loc] device_map={device_map}", file=sys.stderr, flush=True)
+    model_kwargs = {}
+    if attn_implementation is not None:
+        model_kwargs["attn_implementation"] = attn_implementation
     pipe = pipeline(
         "image-text-to-text",
         model=model_id,
         torch_dtype=torch.bfloat16,
         device_map=device_map,
+        model_kwargs=model_kwargs,
     )
     print(f"[medgemma-loc] Pipeline loaded on {device_map}", file=sys.stderr, flush=True)
     return pipe
@@ -458,13 +465,31 @@ def main():
     # ── Load model + run inference ────────────────────────────────────────────
     t0 = time.time()
     try:
-        pipe = load_pipeline(args.gpu)
-        pred = run_inference(pipe, image, anatomies, max_new_tokens=args.max_tokens)
+        try:
+            pipe = load_pipeline(args.gpu)
+            pred = run_inference(pipe, image, anatomies, max_new_tokens=args.max_tokens)
+        except RuntimeError as e:
+            if "attn_bias_ptr is not correctly aligned" not in str(e):
+                raise
+            print(
+                "[medgemma-loc] Attention kernel alignment failed; retrying with eager attention.",
+                file=sys.stderr,
+                flush=True,
+            )
+            del pipe
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            pipe = load_pipeline(args.gpu, attn_implementation="eager")
+            pred = run_inference(pipe, image, anatomies, max_new_tokens=args.max_tokens)
     except Exception as e:
-        import traceback
         print(f"[medgemma-loc] Inference exception: {e}", file=sys.stderr, flush=True)
         traceback.print_exc(file=sys.stderr)
-        print(json.dumps({"status": "error", "error": f"Inference failed: {e}"}))
+        print(json.dumps({
+            "status": "error",
+            "error": f"Inference failed: {type(e).__name__}: {e}",
+            "traceback": traceback.format_exc(),
+        }))
         sys.exit(1)
     elapsed = round(time.time() - t0, 2)
 

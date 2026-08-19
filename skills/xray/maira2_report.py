@@ -216,27 +216,120 @@ def draw_report_boxes(image, findings: list[dict]):
 
     img = image.copy().convert("RGB")
     draw = ImageDraw.Draw(img, "RGBA")
+    width, height = img.size
 
     try:
-        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 16)
+        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 22)
     except Exception:
         font = ImageFont.load_default()
 
     palette = [
-        (255, 80, 80), (80, 200, 80), (80, 130, 255), (255, 200, 50),
-        (200, 80, 255), (50, 220, 220), (255, 140, 0), (180, 255, 80),
+        (255,  80,  80), ( 80, 200,  80), ( 80, 130, 255), (255, 200,  50),
+        (200,  80, 255), ( 50, 220, 220), (255, 140,   0), (180, 255,  80),
+        (255,  80, 200), ( 80, 255, 180), (160, 120, 255), (255, 255,  80),
+        ( 80, 180, 255), (255, 120, 120), (120, 255, 120), (200, 200,  50),
+        ( 50, 200, 200), (200,  50, 200), (255, 180,  80), (100, 200, 255),
     ]
 
     idx = 0
+    box_idx = 0
     for finding in findings:
         boxes = finding.get("boxes_original")
         if not boxes:
             continue
-        color = palette[idx % len(palette)]
         for box in boxes:
-            x1, y1, x2, y2 = (int(v) for v in box)
-            draw.rectangle([x1, y1, x2, y2], outline=color + (255,), width=2, fill=color + (30,))
-            draw.text((x1 + 2, max(y1 - 18, 0)), str(idx + 1), fill=color + (255,), font=font)
+            color = palette[box_idx % len(palette)]
+            x1, y1, x2, y2 = box_to_pixels(box, width, height)
+            if x2 <= x1 or y2 <= y1:
+                continue
+            inset = 8
+            ix1 = min(max(x1 + inset, 0), width - 1)
+            iy1 = min(max(y1 + inset, 0), height - 1)
+            ix2 = max(min(x2 - inset, width - 1), ix1 + 1)
+            iy2 = max(min(y2 - inset, height - 1), iy1 + 1)
+            draw.rectangle([ix1, iy1, ix2, iy2], fill=color + (55,))
+            draw.rectangle([ix1, iy1, ix2, iy2], outline=color + (255,), width=5)
+            handle = 14
+            for hx, hy in ((ix1, iy1), (ix2, iy1), (ix1, iy2), (ix2, iy2)):
+                draw.rectangle(
+                    [hx - handle // 2, hy - handle // 2, hx + handle // 2, hy + handle // 2],
+                    fill=color + (255,),
+                )
+            cx = (ix1 + ix2) // 2
+            cy = (iy1 + iy2) // 2
+            draw.line([cx - 10, cy, cx + 10, cy], fill=color + (255,), width=3)
+            draw.line([cx, cy - 10, cx, cy + 10], fill=color + (255,), width=3)
+            label = str(idx + 1)
+            label_bbox = draw.textbbox((ix1, iy1), label, font=font)
+            label_w = label_bbox[2] - label_bbox[0]
+            label_h = label_bbox[3] - label_bbox[1]
+            label_y = max(iy1 - label_h - 10, 0)
+            draw.rectangle([ix1, label_y, ix1 + label_w + 12, label_y + label_h + 10], fill=color + (220,))
+            draw.text((ix1 + 6, label_y + 4), label, fill=(255, 255, 255, 255), font=font)
+            box_idx += 1
+        idx += 1
+
+    return img
+
+
+def box_to_pixels(box, width: int, height: int):
+    """Convert MAIRA boxes to pixel coords.
+
+    MAIRA processor versions have returned adjusted boxes as either absolute
+    pixels or normalized floats in [0, 1]. Normalize both forms here.
+    """
+    x1, y1, x2, y2 = [float(v) for v in box]
+    if max(abs(x1), abs(y1), abs(x2), abs(y2)) <= 1.5:
+        x1 *= width
+        x2 *= width
+        y1 *= height
+        y2 *= height
+    x1, x2 = sorted((max(0, min(width - 1, int(round(x1)))), max(0, min(width - 1, int(round(x2))))))
+    y1, y2 = sorted((max(0, min(height - 1, int(round(y1)))), max(0, min(height - 1, int(round(y2))))))
+    return x1, y1, x2, y2
+
+
+def draw_box_map(image, findings: list[dict]):
+    from PIL import Image, ImageDraw, ImageFont
+
+    width, height = image.size
+    img = Image.new("RGB", (width, height), (18, 18, 18))
+    draw = ImageDraw.Draw(img, "RGBA")
+
+    try:
+        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 28)
+    except Exception:
+        font = ImageFont.load_default()
+
+    palette = [
+        (255,  80,  80), ( 80, 200,  80), ( 80, 130, 255), (255, 200,  50),
+        (200,  80, 255), ( 50, 220, 220), (255, 140,   0), (180, 255,  80),
+        (255,  80, 200), ( 80, 255, 180), (160, 120, 255), (255, 255,  80),
+        ( 80, 180, 255), (255, 120, 120), (120, 255, 120), (200, 200,  50),
+        ( 50, 200, 200), (200,  50, 200), (255, 180,  80), (100, 200, 255),
+    ]
+
+    idx = 0
+    box_idx = 0
+    for finding in findings:
+        boxes = finding.get("boxes_original")
+        if not boxes:
+            continue
+        for box in boxes:
+            color = palette[box_idx % len(palette)]
+            x1, y1, x2, y2 = box_to_pixels(box, width, height)
+            if x2 <= x1 or y2 <= y1:
+                continue
+            draw.rectangle([x1, y1, x2, y2], fill=color + (60,), outline=color + (255,), width=6)
+            draw.line([x1, y1, x2, y2], fill=color + (255,), width=3)
+            draw.line([x1, y2, x2, y1], fill=color + (255,), width=3)
+            label = str(idx + 1)
+            label_bbox = draw.textbbox((x1, y1), label, font=font)
+            label_w = label_bbox[2] - label_bbox[0]
+            label_h = label_bbox[3] - label_bbox[1]
+            draw.rectangle([x1, y1, x1 + label_w + 16, y1 + label_h + 14], fill=color + (220,))
+            draw.text((x1 + 8, y1 + 6), label, fill=(255, 255, 255, 255), font=font)
+            box_idx += 1
         idx += 1
 
     return img
@@ -424,6 +517,11 @@ def main():
     preview_path.parent.mkdir(parents=True, exist_ok=True)
     preview_image.save(str(preview_path))
     result["preview_image_path"] = str(preview_path)
+    if result["n_with_boxes"] > 0:
+        box_map_path = preview_path.with_name("boxes_only.png")
+        draw_box_map(frontal, pred_dict["findings"]).save(str(box_map_path))
+        result["box_map_image_path"] = str(box_map_path)
+        result["preview_image_paths"] = [str(preview_path), str(box_map_path)]
 
     # ── Optional: save to file ────────────────────────────────────────────────
     if args.output:
